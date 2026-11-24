@@ -48,7 +48,8 @@
       [accounted === snap.protocols.length, 'All ' + snap.protocols.length + ' protocols accounted: ' + rows.length + ' ranked, ' + liveProducts + ' trade, ' + R.aside.length + ' set aside'],
       [ordered, 'Ranks 1–' + rows.length + ', value never rises'],
       [board.length > 0 && same === board.length && board.length === rows.length, 'Page recomputed ' + same + '/' + board.length + ' board.json rows exactly'],
-      [F.held_out.model < F.held_out.flat, 'Held-out miss ' + mult(F.held_out.model) + ' beats a flat multiple\'s ' + mult(F.held_out.flat)]
+      [F.held_out.model < F.held_out.flat && F.held_out.model < F.held_out.size_only, 'Held-out miss ' + mult(F.held_out.model) + ' beats a flat multiple (' + mult(F.held_out.flat) + ') and the size curve alone (' + mult(F.held_out.size_only) + ')'],
+      [F.selection.every(function (v) { return v.kept === (F.terms.indexOf(v.term) >= 0) && (!v.kept || v.with < v.without); }), F.selection.length + ' snapshot terms tested held-out: ' + F.terms.length + ' kept, ' + (F.selection.length - F.terms.length) + ' dropped']
     ];
     return '<ul class="strip">' + checks.map(function (c) { return '<li class="' + (c[0] ? 'ok' : 'bad') + '">' + (c[0] ? '✓ ' : '✗ ') + esc(c[1]) + '</li>'; }).join('') + '</ul>';
   }
@@ -119,7 +120,7 @@
     var total = list.reduce(function (s, r) { return s + r.implied_value_usd; }, 0);
     var active = Object.keys(DEFAULT).some(function (k) { return k !== 'sort' && k !== 'dir' && st[k] !== DEFAULT[k]; });
     var html = '<section class="hero"><div><h1>' + rows.length + ' protocols with no token on record, ranked by what a launch would be worth</h1>' +
-      '<p class="lede">Implied value is the market cap the snapshot\'s ' + F.tokens + ' traded tokens put on a protocol of this TVL and family (a fitted size curve: cap grows as TVL<sup>' + F.size_elasticity.toFixed(2) + '</sup>), nudged by seven-day momentum and time run with no token. Every watchlist protocol is here, with ' + (rows.length - watch) + ' early ones below the $50M floor held to the same rule. A model\'s estimate, not a price.</p></div>' +
+      '<p class="lede">Implied value is the market cap the snapshot\'s ' + F.tokens + ' traded tokens put on a protocol of this TVL (a fitted size curve: cap grows as TVL<sup>' + F.size_elasticity.toFixed(2) + '</sup>), plus every snapshot term that earned its place on held-out tokens: ' + keptText() + '. Every watchlist protocol is here, with ' + (rows.length - watch) + ' early ones below the $50M floor held to the same rule. A model\'s estimate, not a price.</p></div>' +
       '<dl class="kpis"><div><dt>Watchlist covered</dt><dd>' + watch + ' / ' + snap.watchlist.length + '</dd></div>' +
       '<div><dt>Held-out miss, median</dt><dd>' + mult(F.held_out.model) + '</dd></div>' +
       '<div><dt>Farm · thin · skip</dt><dd>' + tally('farm') + ' · ' + tally('thin') + ' · ' + tally('skip') + '</dd></div>' +
@@ -178,6 +179,17 @@
 
   // ------------------------------------------------------------ detail
 
+  function verdictOf(term) { return F.selection.filter(function (v) { return v.term === term; })[0]; }
+  function termNote(term, what) {
+    var v = verdictOf(term);
+    return what + (v.kept ? '; kept: held-out miss ' + mult(v.without) + ' → ' + mult(v.with) : '; tested and dropped (held-out ' + mult(v.without) + ' → ' + mult(v.with) + '), so ×1');
+  }
+  function keptText() {
+    var k = F.selection.filter(function (v) { return v.kept; }).map(function (v) { return v.label; });
+    var d = F.selection.filter(function (v) { return !v.kept; }).map(function (v) { return v.label; });
+    return (k.length ? k.join(' and ') : 'none') + (d.length ? ' (' + d.join(' and ') + ' tested and dropped)' : '');
+  }
+
   function renderDetail(slug) {
     var r = bySlug[slug];
     if (!r) { app.innerHTML = '<p class="empty">No protocol ' + esc(slug) + ' on the board. <a href="#board">Back to the board</a></p>'; return; }
@@ -186,9 +198,9 @@
     var build = [
       ['TVL', r.tvl_usd, 'Snapshot figure'],
       ['Size curve', size, 'What ' + F.tokens + ' traded tokens put on this TVL: cap grows as TVL<sup>' + F.size_elasticity.toFixed(3) + '</sup>'],
-      ['× ' + esc(r.family) + ' level ' + mult(Math.exp(m.family_level)), m.fitted_core, 'Fitted family offset; the core value is ' + mult(m.implied_multiple) + ' TVL'],
-      ['× momentum ' + mult(m.momentum), m.fitted_core * m.momentum, 'Seven-day TVL ' + (r.change_7d === null ? 'not reported: neutral' : (r.change_7d >= 0 ? '+' : '') + r.change_7d.toFixed(2) + '%')],
-      ['× maturity ' + mult(m.maturity), r.implied_value_usd, r.age_days === null ? 'No listing date: neutral' : age(r.age_days) + ' tracked with no token → implied value']
+      ['× ' + esc(r.family) + ' level ' + mult(m.parts.family), size * m.parts.family, termNote('family', 'Fitted family offset')],
+      ['× 7d growth ' + mult(m.parts.growth), size * m.parts.family * m.parts.growth, termNote('growth', 'Seven-day TVL ' + (r.change_7d === null ? 'not reported' : (r.change_7d >= 0 ? '+' : '') + r.change_7d.toFixed(2) + '%'))],
+      ['× years tracked ' + mult(m.parts.age), r.implied_value_usd, termNote('age', r.age_days === null ? 'No listing date: neutral' : age(r.age_days) + ' tracked with no token') + ' → implied value, ' + mult(m.implied_multiple) + ' TVL']
     ];
     var top = Math.max.apply(null, build.map(function (b) { return b[1]; }));
     // Comparables: the traded tokens of the same family nearest this TVL.
@@ -267,18 +279,31 @@
     return s + '</svg>';
   }
 
+  function formula() {
+    var C = M.CONST, c = F.coef, pad = function (t) { return (t + '                                ').slice(0, 34); };
+    var lines = ['ln cap = ' + F.intercept.toFixed(3), '       ' + pad('+ ' + F.size_elasticity.toFixed(3) + ' × (ln TVL − ' + C.size_center + ')') + 'size curve'];
+    if (F.terms.indexOf('family') >= 0) lines.push('       ' + pad('+ family level') + 'fitted, see below');
+    if (F.terms.indexOf('growth') >= 0) lines.push('       ' + pad('+ ' + c.growth.toFixed(3) + ' × tanh(7d % ÷ 30)') + '7-day growth');
+    if (F.terms.indexOf('age') >= 0) lines.push('       ' + pad('+ ' + c.age.toFixed(3) + ' × (years tracked − ' + C.age_center_years + ')') + 'capped at 6 years');
+    if (F.terms.indexOf('undated') >= 0) lines.push('       ' + pad('+ ' + c.undated.toFixed(3) + ' if no listing date') + '');
+    lines.push('  (ridge λ=' + C.ridge_lambda + ' on ' + F.tokens + ' traded tokens, one per ticker)', '', 'implied value = e^(ln cap)');
+    F.selection.forEach(function (v) { if (!v.kept) lines.push('dropped: ' + v.label + ', no held-out gain'); });
+    return lines.join('\n');
+  }
+
   function renderModel() {
     var C = M.CONST, h = F.held_out;
     var aside = {};
     R.aside.forEach(function (a) { aside[a.reason] = (aside[a.reason] || 0) + 1; });
     var fams = Object.keys(F.family_levels).sort(function (a, b) { return F.family_levels[b] - F.family_levels[a]; });
     var html = '<section class="hero slim"><div><h1>The model: ' + esc(M.VERSION) + '</h1><p class="lede">One file, model.js, fits and scores everything from the snapshot\'s own figures; no protocol name is special-cased. main.ts runs the same file to write board.json, and this page re-runs it and checks every row against that board.</p></div></section>';
-    html += '<div class="grid2"><section class="card"><h3>Formula</h3><pre>ln cap = ' + F.intercept.toFixed(3) + '\n       + ' + F.size_elasticity.toFixed(3) + ' × (ln TVL − ' + C.size_center + ')     size curve\n       + family level                   fitted, see below\n  (ridge λ=' + C.ridge_lambda + ' on ' + F.tokens + ' traded tokens, one per ticker)\n\nimplied = e^(ln cap)\n        × momentum   exp(' + C.growth_weight + ' × tanh(7d % ÷ 30))   ±20% at most\n        × maturity   ×' + C.maturity_start + ' at listing → ×' + C.maturity_peak + ' from 18 months\n                     to 3 years → ×' + C.maturity_old + ' by 6 years</pre>' +
+    html += '<div class="grid2"><section class="card"><h3>Formula</h3><pre>' + formula() + '</pre>' +
       '<h3>Held-out test</h3><p class="note">Each traded token is priced by a fit that never saw it. Median miss, and the share priced within 3×:</p><table class="mini"><thead><tr><th>Rule</th><th class="num">Median miss</th><th class="num">Within 3×</th></tr></thead><tbody>' +
       '<tr><td>Flat multiple (median cap ÷ TVL)</td><td class="num">' + mult(h.flat) + '</td><td class="num">' + share(h.flat_within3) + '</td></tr>' +
       '<tr><td>Size curve alone</td><td class="num">' + mult(h.size_only) + '</td><td class="num">' + share(h.size_only_within3) + '</td></tr>' +
-      '<tr class="used"><td>Size curve + family level (used)</td><td class="num">' + mult(h.model) + '</td><td class="num">' + share(h.model_within3) + '</td></tr></tbody></table>' +
-      '<p class="note">Fitted on traded tokens, seven-day growth and listing age do not lower the held-out miss reliably, so they enter by rule with bounded weight rather than as fitted terms.</p></section>' +
+      '<tr class="used"><td>Size curve + ' + F.terms.map(function (t) { return verdictOf(t).label; }).join(' + ') + ' (used)</td><td class="num">' + mult(h.model) + '</td><td class="num">' + share(h.model_within3) + '</td></tr></tbody></table>' +
+      '<h3>Every candidate term, kept or dropped</h3><p class="note">Forward selection on the same held-out test: a term stays only if it cuts the median miss by ' + share(C.keep_gain) + ' or more over the terms already in. Mean log miss shown beside it, so a term that helps the median but not the tail is visible.</p><table class="mini"><thead><tr><th>Term</th><th class="num">Without</th><th class="num">With</th><th class="num">Mean ln miss</th><th>Call</th></tr></thead><tbody>' +
+      F.selection.map(function (v) { return '<tr' + (v.kept ? ' class="used"' : '') + '><td>' + esc(v.label) + '</td><td class="num">' + mult(v.without) + '</td><td class="num">' + mult(v.with) + '</td><td class="num">' + v.mean_without.toFixed(3) + ' → ' + v.mean_with.toFixed(3) + '</td><td>' + (v.kept ? 'kept' : 'dropped') + '</td></tr>'; }).join('') + '</tbody></table></section>' +
       '<section class="card"><h3>Fit against the market</h3>' + validationChart() + '<p class="legend">' + ['vaults', 'credit', 'trading', 'realworld', 'network', 'other'].map(function (f) { return '<span><i class="dot-key ' + f + '"></i>' + f + '</span>'; }).join('') + '</p><p class="note">Shaded: within the median miss, ' + mult(h.model) + ', of the diagonal.</p></section>' +
       '<section class="card"><h3>Family levels</h3><table class="mini"><thead><tr><th>Family</th><th class="num">Level</th><th class="num">Traded tokens</th><th class="num">Board rows</th></tr></thead><tbody>' +
       fams.map(function (f) { return '<tr><td>' + esc(f) + '</td><td class="num">' + mult(Math.exp(F.family_levels[f])) + '</td><td class="num">' + R.live.filter(function (l) { return M.familyOf(l.category) === f; }).length + '</td><td class="num">' + rows.filter(function (r) { return r.family === f; }).length + '</td></tr>'; }).join('') + '</tbody></table>' +

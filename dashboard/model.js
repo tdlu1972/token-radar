@@ -26,15 +26,10 @@
   var CONST = {
     ridge_lambda: 3,        // ridge penalty on the fitted terms (not the intercept), chosen on held-out error
     size_center: 18,        // ln TVL is centred here (about $66M) so the intercept reads as a mid-size cap
-    growth_floor: -50,
+    growth_floor: -50,      // the growth term reads tanh(clamped 7d % / 30)
     growth_cap: 100,
-    growth_weight: 0.2,     // momentum = exp(weight * tanh(growth / 30)): at most about ±20%
-    ramp_days: 540,         // maturity climbs to its peak over the first 18 months
-    peak_until: 1095,       // and holds it to 3 years
-    fade_until: 2190,       // then fades to its floor by 6 years with no token
-    maturity_start: 0.8,
-    maturity_peak: 1.1,
-    maturity_old: 0.9,
+    age_center_years: 3,    // the age term reads years tracked (capped at 6) minus 3
+    keep_gain: 0.01,        // a candidate term is kept only if it cuts the held-out median miss by 1% or more
     odds_k: 5,              // pseudo-protocols pulling a thin category or age band toward the whole field
     airdrop_share: 0.075,   // share of a launch's value a points campaign typically hands out
     capital_usd: 500,       // the stake every farm plan is costed at
@@ -86,7 +81,7 @@
 
   // One row per traded token: protocols that carry the same ticker (Aave V2, V3, V4 and Horizon all
   // record AAVE) share one market cap, so the token's multiple is its cap over all of their TVL.
-  function liveTokens(protocols) {
+  function liveTokens(protocols, asOf) {
     var by = {};
     protocols.forEach(function (p) {
       var key = (p.symbol || p.gecko_id || '').toUpperCase();
@@ -100,7 +95,7 @@
       if (!lead) return;
       var tvl = group.reduce(function (s, p) { return s + p.tvl_usd; }, 0);
       if (tvl <= 0) return;
-      out.push({ slug: lead.slug, name: lead.name, symbol: lead.symbol || key, category: lead.category, chains: lead.chains, change_7d: lead.change_7d, listed_at: lead.listed_at,
+      out.push({ slug: lead.slug, name: lead.name, symbol: lead.symbol || key, category: lead.category, chains: lead.chains, change_7d: lead.change_7d, listed_at: lead.listed_at, age_days: asOf ? ageDays(asOf, lead.listed_at) : null,
         mcap_usd: lead.mcap_usd, tvl_usd: tvl, products: group.length, multiple: lead.mcap_usd / tvl });
     });
     return out.sort(function (a, b) { return b.mcap_usd - a.mcap_usd; });
@@ -108,13 +103,19 @@
 
   // ---------------------------------------------------------------- the value fit
 
-  // The fitted core: ln(market cap) = a + b ln(TVL) + a family level, by ridge least squares over the
-  // snapshot's traded tokens. b < 1 is the size curve: a small protocol's cap is a larger multiple of
-  // its TVL than a large one's.
-  function features(tvl, category) {
-    var x = [1, Math.log(tvl) - CONST.size_center];
-    var f = familyOf(category);
-    FAMS.forEach(function (name) { x.push(f === name ? 1 : 0); });
+  // The fitted core: ln(market cap) = a + b ln(TVL) + whichever candidate terms earn their place, by
+  // ridge least squares over the snapshot's traded tokens. b < 1 is the size curve: a small protocol's
+  // cap is a larger multiple of its TVL than a large one's.
+  var TERMS = {
+    family: { label: 'family level', cols: FAMS.slice(), x: function (t) { var f = familyOf(t.category); return FAMS.map(function (n) { return f === n ? 1 : 0; }); } },
+    growth: { label: '7-day TVL growth', cols: ['growth'], x: function (t) { return [Math.tanh(clamp(t.change_7d === null ? 0 : t.change_7d, CONST.growth_floor, CONST.growth_cap) / 30)]; } },
+    age: { label: 'years tracked', cols: ['age'], x: function (t) { return [t.age_days === null ? 0 : Math.min(6, t.age_days / 365) - CONST.age_center_years]; } },
+    undated: { label: 'no listing date', cols: ['undated'], x: function (t) { return [t.age_days === null ? 1 : 0]; } }
+  };
+  var CANDIDATES = ['family', 'growth', 'age', 'undated'];
+  function features(t, terms) {
+    var x = [1, Math.log(t.tvl_usd) - CONST.size_center];
+    terms.forEach(function (name) { x.push.apply(x, TERMS[name].x(t)); });
     return x;
   }
   function dot(w, x) { var s = 0; for (var i = 0; i < x.length; i++) s += w[i] * x[i]; return s; }
@@ -149,28 +150,65 @@
       var rest = live.filter(function (_, j) { return j !== i; });
       return Math.abs(predictWithout(rest, t) - Math.log(t.mcap_usd));
     });
-    return { factor: Math.exp(median(err)), within3: err.filter(function (e) { return e < Math.log(3); }).length / err.length, errors: err };
+    var mean = err.reduce(function (a, b) { return a + b; }, 0) / err.length;
+    return { factor: Math.exp(median(err)), mean: mean, within3: err.filter(function (e) { return e < Math.log(3); }).length / err.length, errors: err };
   }
 
+  function fitOn(set, terms) {
+    return ridge(set.map(function (t) { return features(t, terms); }), set.map(function (t) { return Math.log(t.mcap_usd); }), CONST.ridge_lambda);
+  }
+  function heldOutTerms(live, terms) {
+    return heldOut(live, function (rest, t) { return dot(fitOn(rest, terms), features(t, terms)); });
+  }
+
+  // Forward selection on held-out error: start from the size curve, try each candidate term, keep the
+  // one that cuts the leave-one-out median miss most (by keep_gain or more), and repeat until none does.
+  // Every trial is recorded, so the page shows what each term was worth, kept or dropped.
   function fitValue(live) {
-    var lam = CONST.ridge_lambda;
-    function fitOn(set) { return ridge(set.map(function (t) { return features(t.tvl_usd, t.category); }), set.map(function (t) { return Math.log(t.mcap_usd); }), lam); }
-    var w = fitOn(live);
-    var model = heldOut(live, function (rest, t) { return dot(fitOn(rest), features(t.tvl_usd, t.category)); });
-    // The two simpler rules it has to beat on the same held-out tokens.
-    var flat = heldOut(live, function (rest, t) { return Math.log(t.tvl_usd) + median(rest.map(function (u) { return Math.log(u.multiple); })); });
-    var sizeOnly = heldOut(live, function (rest, t) {
-      var ws = ridge(rest.map(function (u) { return [1, Math.log(u.tvl_usd) - CONST.size_center]; }), rest.map(function (u) { return Math.log(u.mcap_usd); }), lam);
-      return ws[0] + ws[1] * (Math.log(t.tvl_usd) - CONST.size_center);
+    var terms = [], best = heldOutTerms(live, terms), trials = [], step = 0;
+    for (;;) {
+      var pick = null, pickRes = null;
+      step++;
+      CANDIDATES.forEach(function (c) {
+        if (terms.indexOf(c) >= 0) return;
+        var r = heldOutTerms(live, terms.concat([c]));
+        trials.push({ step: step, term: c, label: TERMS[c].label, base: best.factor, with: r.factor, mean_base: best.mean, mean_with: r.mean });
+        if (r.factor < best.factor * (1 - CONST.keep_gain) && (!pickRes || r.factor < pickRes.factor)) { pick = c; pickRes = r; }
+      });
+      if (!pick) break;
+      terms.push(pick); best = pickRes;
+    }
+    var verdicts = CANDIDATES.map(function (c) {
+      var last = trials.filter(function (t) { return t.term === c; }).pop();
+      return { term: c, label: TERMS[c].label, kept: terms.indexOf(c) >= 0, without: last.base, with: last.with, mean_without: last.mean_base, mean_with: last.mean_with };
     });
-    var points = live.map(function (t, i) { return { name: t.name, family: familyOf(t.category), actual: t.mcap_usd, fitted: Math.exp(dot(w, features(t.tvl_usd, t.category))), held_out_error: model.errors[i] }; });
-    var levels = {};
-    FAMS.forEach(function (f, i) { levels[f] = w[2 + i]; });
-    levels.other = 0;
+    var w = fitOn(live, terms);
+    var flat = heldOut(live, function (rest, t) { return Math.log(t.tvl_usd) + median(rest.map(function (u) { return Math.log(u.multiple); })); });
+    var sizeOnly = heldOutTerms(live, []);
+    var points = live.map(function (t, i) { return { name: t.name, family: familyOf(t.category), actual: t.mcap_usd, fitted: Math.exp(dot(w, features(t, terms))), held_out_error: best.errors[i] }; });
+    // Named coefficients: family levels (other = 0), and the kept scalar terms.
+    var coef = {}, at = 2;
+    terms.forEach(function (name) { TERMS[name].cols.forEach(function (col) { coef[col] = w[at++]; }); });
+    var levels = { other: 0 };
+    FAMS.forEach(function (f) { levels[f] = coef[f] || 0; });
     return {
-      weights: w, intercept: w[0], size_elasticity: w[1], family_levels: levels, tokens: live.length,
-      held_out: { model: model.factor, model_within3: model.within3, flat: flat.factor, flat_within3: flat.within3, size_only: sizeOnly.factor, size_only_within3: sizeOnly.within3 },
-      points: points
+      weights: w, terms: terms, coef: coef, intercept: w[0], size_elasticity: w[1], family_levels: levels, tokens: live.length,
+      selection: verdicts,
+      held_out: { model: best.factor, model_within3: best.within3, model_mean: best.mean, flat: flat.factor, flat_within3: flat.within3, flat_mean: flat.mean, size_only: sizeOnly.factor, size_only_within3: sizeOnly.within3, size_only_mean: sizeOnly.mean },
+      points: points,
+      predict: function (t) { return Math.exp(dot(w, features(t, terms))); },
+      // The multiplier each kept term contributes for this protocol (1 when dropped).
+      parts: function (t) {
+        var out = {};
+        CANDIDATES.forEach(function (name) {
+          var i = terms.indexOf(name);
+          if (i < 0) { out[name] = 1; return; }
+          var x = TERMS[name].x(t), s = 0;
+          TERMS[name].cols.forEach(function (col, j) { s += coef[col] * x[j]; });
+          out[name] = Math.exp(s);
+        });
+        return out;
+      }
     };
   }
 
@@ -205,20 +243,6 @@
         return { odds: 1 / (1 + Math.exp(-z)), category: c, age: a, band: ageBand(age) };
       }
     };
-  }
-
-  function momentum(change) {
-    var g = clamp(change === null ? 0 : change, CONST.growth_floor, CONST.growth_cap);
-    return { growth: g, mult: Math.exp(CONST.growth_weight * Math.tanh(g / 30)) };
-  }
-
-  function maturity(age) {
-    var C = CONST;
-    if (age === null) return 1;
-    if (age <= C.ramp_days) return C.maturity_start + (C.maturity_peak - C.maturity_start) * age / C.ramp_days;
-    if (age <= C.peak_until) return C.maturity_peak;
-    if (age <= C.fade_until) return C.maturity_peak - (C.maturity_peak - C.maturity_old) * (age - C.peak_until) / (C.fade_until - C.peak_until);
-    return C.maturity_old;
   }
 
   // ---------------------------------------------------------------- farm plans
@@ -303,7 +327,7 @@
 
   function build(snapshot) {
     var protocols = snapshot.protocols;
-    var live = liveTokens(protocols);
+    var live = liveTokens(protocols, snapshot.as_of);
     var fit = fitValue(live);
     var odds = launchOdds(protocols, snapshot.as_of);
     var sib = siblings(protocols);
@@ -318,10 +342,10 @@
       var why = watch[p.slug] ? null : setAsideReason(p) || (sibling ? 'sibling of a token that trades' : null);
       if (why) { aside.push({ slug: p.slug, name: p.name, reason: why }); return; }
       var age = ageDays(snapshot.as_of, p.listed_at);
-      var core = Math.exp(dot(fit.weights, features(p.tvl_usd, p.category)));
-      var mo = momentum(p.change_7d);
-      var ma = maturity(age);
-      var implied = Math.max(1, Math.round(core * mo.mult * ma));
+      var subject = { tvl_usd: p.tvl_usd, category: p.category, change_7d: p.change_7d, age_days: age };
+      var core = fit.predict(subject);
+      var parts = fit.parts(subject);
+      var implied = Math.max(1, Math.round(core));
       var od = odds.of(p.category, age);
       var plan = farmPlan(p);
       rows.push({
@@ -332,7 +356,7 @@
         sibling: sibling,
         implied_value_usd: implied,
         range_usd: [Math.round(implied / fit.held_out.model), Math.round(implied * fit.held_out.model)],
-        model: { fitted_core: core, implied_multiple: core / p.tvl_usd, family_level: fit.family_levels[familyOf(p.category)], growth_pct: mo.growth, momentum: mo.mult, maturity: ma },
+        model: { fitted_core: core, implied_multiple: core / p.tvl_usd, family_level: fit.family_levels[familyOf(p.category)], size_curve: core / parts.family / parts.growth / parts.age / parts.undated, parts: parts },
         launch_odds: od.odds,
         odds_parts: od,
         airdrop_per_1k: implied * CONST.airdrop_share * 1000 / p.tvl_usd,
@@ -349,6 +373,6 @@
     return { rows: rows, live: live, aside: aside, fit: fit, odds: odds, constants: CONST, protocols: protocols.length };
   }
 
-  var api = { build: build, liveTokens: liveTokens, fitValue: fitValue, farmPlan: farmPlan, verdict: verdict, stepText: stepText, momentum: momentum, maturity: maturity, tokenStatus: tokenStatus, familyOf: familyOf, CONST: CONST, VERSION: 'radar-fit-2' };
+  var api = { build: build, liveTokens: liveTokens, fitValue: fitValue, farmPlan: farmPlan, verdict: verdict, stepText: stepText, tokenStatus: tokenStatus, familyOf: familyOf, CONST: CONST, VERSION: 'radar-fit-3' };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.RadarModel = api;
 })(this);

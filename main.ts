@@ -68,8 +68,10 @@ const board = rows.map((r: any) => ({
   model: {
     fitted_core_usd: Math.round(r.model.fitted_core),
     family_level: Number(r.model.family_level.toFixed(4)),
-    momentum: Number(r.model.momentum.toFixed(4)),
-    maturity: Number(r.model.maturity.toFixed(4)),
+    size_curve_usd: Math.round(r.model.size_curve),
+    family_x: Number(r.model.parts.family.toFixed(4)),
+    growth_x: Number(r.model.parts.growth.toFixed(4)),
+    age_x: Number(r.model.parts.age.toFixed(4)),
   },
   launch_odds: Number(r.launch_odds.toFixed(4)),
   farm: {
@@ -85,7 +87,7 @@ const board = rows.map((r: any) => ({
 }));
 
 mkdirSync(out, { recursive: true });
-const fit = { tokens: radar.fit.tokens, intercept: radar.fit.intercept, size_elasticity: radar.fit.size_elasticity, family_levels: radar.fit.family_levels, held_out: radar.fit.held_out };
+const fit = { tokens: radar.fit.tokens, terms: radar.fit.terms, coef: radar.fit.coef, intercept: radar.fit.intercept, size_elasticity: radar.fit.size_elasticity, family_levels: radar.fit.family_levels, held_out: radar.fit.held_out, selection: radar.fit.selection };
 writeFileSync(join(out, 'board.json'), `${JSON.stringify({ model: Model.VERSION, as_of: snapshot.as_of, source: snapshot.source, constants: Model.CONST, fit, rows: board })}\n`);
 
 // The page gets the snapshot itself and runs the model on it.
