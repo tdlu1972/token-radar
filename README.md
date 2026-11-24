@@ -6,11 +6,11 @@
 
 Launch Radar ranks the DefiLlama protocols that record no token by what a launch would be worth, and gives each one a costed farm plan.
 
-**The value model** (`dashboard/model.js`, run by both the page and `main.ts`) prices each pre-token protocol against the tokens that already trade in the same snapshot. Every live token gets one market-cap-to-TVL multiple, its cap over the TVL of every product that carries its ticker (Aave V2, V3, V4 and Horizon share AAVE). The median multiple of a category is shrunk in log space toward its family's (vaults, credit, trading, real world, network), and the family's toward the whole market, so a category with one priced peer cannot carry its rows. Implied value is TVL × that multiple × seven-day momentum × a maturity curve over the months run with no token × chain reach. Launch odds (the share of a category's protocols that already record a token) and the airdrop a $1,000 stake would earn sit beside the value, never inside it.
+**The value model** (`dashboard/model.js`, run by both the page and `main.ts`) is fitted on the snapshot's own traded tokens, one row per ticker (Aave V2, V3, V4 and Horizon share AAVE, so AAVE's cap is set against all of their TVL). A ridge regression of ln(market cap) on ln(TVL) and a family level (vaults, credit, trading, real world, network) gives the size curve: cap grows as TVL^0.53, so a small protocol is worth a larger multiple of its TVL than a large one. Every traded token is priced by a fit that never saw it: the median miss is 3.2x, against 5.0x for a flat multiple. Seven-day momentum and time run with no token adjust the fitted core by bounded rule, since fitted on traded tokens they do not cut the held-out miss.
 
-**The board** covers the 40-protocol watchlist and holds the protocols below the $50M floor to the house's own rule: no wrapped, staked, bridged, versioned or exchange products, and no sibling of a token that trades (GMX Solana beside GMX). Live tokens are listed on their own tab at the market's value.
+**Launch odds** combine the share of a protocol's category and of its age band that already record a token. **Farm verdicts** set the stake's expected drop (value x 7.5% airdrop x the stake's share of TVL x odds) against every fee its plan costs on the protocol's cheapest chain: farm, thin or skip, with the stake at which fees are covered.
 
-**Farm plans** pick the protocol's cheapest chain, size the stake, and cost every step in gas, capital and time.
+**The board** covers the 40-protocol watchlist and holds the protocols below the $50M floor to the house's own rule: no wrapped, staked, bridged, versioned or exchange products, and no sibling of a token that trades (GMX Solana beside GMX). The page re-runs the model and checks itself on screen: watchlist coverage, all 758 protocols accounted for, rank order, and every row recomputed to the dollar of board.json.
 
 ## Run it
 

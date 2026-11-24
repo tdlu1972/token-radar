@@ -54,27 +54,45 @@ const board = rows.map((r: any) => ({
   slug: r.slug,
   name: r.name,
   implied_value_usd: r.implied_value_usd,
+  implied_range_usd: r.range_usd,
   tier: r.tier,
   token_status: r.token_status,
+  sibling_token: r.sibling ? r.sibling.symbol : null,
   category: r.category,
+  family: r.family,
   chains: r.chains,
   tvl_usd: r.tvl_usd,
   change_7d: r.change_7d,
   listed_at: r.listed_at,
   age_days: r.age_days,
-  model: r.model,
+  model: {
+    fitted_core_usd: Math.round(r.model.fitted_core),
+    family_level: Number(r.model.family_level.toFixed(4)),
+    momentum: Number(r.model.momentum.toFixed(4)),
+    maturity: Number(r.model.maturity.toFixed(4)),
+  },
   launch_odds: Number(r.launch_odds.toFixed(4)),
-  airdrop_per_1k_usd: Number(r.airdrop_per_1k.toFixed(2)),
-  farm: { chain: r.plan.chain, capital_usd: r.plan.capital, hold_days: r.plan.hold_days, setup_cost_usd: Number(r.plan.setup_cost.toFixed(2)), monthly_cost_usd: Number(r.plan.monthly_cost.toFixed(2)) },
+  farm: {
+    chain: r.plan.chain,
+    capital_usd: r.plan.capital,
+    hold_days: r.plan.hold_days,
+    fees_usd: Number(r.verdict.fees_usd.toFixed(2)),
+    expected_drop_usd: Number(r.verdict.expected_usd.toFixed(2)),
+    verdict: r.verdict.call,
+    breakeven_stake_usd: r.verdict.breakeven_stake_usd === null ? null : Math.round(r.verdict.breakeven_stake_usd),
+  },
   farm_steps: r.farm_steps,
 }));
 
 mkdirSync(out, { recursive: true });
-writeFileSync(join(out, 'board.json'), `${JSON.stringify({ model: Model.VERSION, as_of: snapshot.as_of, source: snapshot.source, constants: Model.CONST, rows: board })}\n`);
+const fit = { tokens: radar.fit.tokens, intercept: radar.fit.intercept, size_elasticity: radar.fit.size_elasticity, family_levels: radar.fit.family_levels, held_out: radar.fit.held_out };
+writeFileSync(join(out, 'board.json'), `${JSON.stringify({ model: Model.VERSION, as_of: snapshot.as_of, source: snapshot.source, constants: Model.CONST, fit, rows: board })}\n`);
 
 // The page gets the snapshot itself and runs the model on it.
 const page = { as_of: snapshot.as_of, source: snapshot.source, floor_usd: snapshot.floor_usd, watchlist: snapshot.watchlist, protocols: snapshot.protocols };
-writeFileSync(join(out, 'data.js'), `window.RADAR_SNAPSHOT = ${JSON.stringify(page)};\n`);
+// The board's own rank and value per slug, so the page can check its recomputation against them.
+const check = board.map((r: { slug: string; implied_value_usd: number; rank: number }) => [r.slug, r.implied_value_usd, r.rank]);
+writeFileSync(join(out, 'data.js'), `window.RADAR_SNAPSHOT = ${JSON.stringify(page)};\nwindow.RADAR_BOARD = ${JSON.stringify(check)};\n`);
 
 function copyDir(from: string, to: string): string[] {
   if (!existsSync(from)) return [];

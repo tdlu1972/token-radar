@@ -5,7 +5,7 @@
 
   var DAY = 86400000;
 
-  // Category -> family. A category with few priced peers borrows its family's multiple.
+  // Category -> family. The value fit gives each family its own level; a category is too thin to.
   var FAMILY = {
     vaults: ['Risk Curators', 'Onchain Capital Allocator', 'Yield Aggregator', 'Yield', 'Liquidity Manager', 'Leveraged Farming', 'Farm', 'Options Vault', 'Indexes', 'Token Locker'],
     credit: ['Lending', 'CDP', 'CDP Manager', 'Uncollateralized Lending', 'Collateral Markets', 'Collateral Management', 'Dual-Token Stablecoin', 'Stablecoin Wrapper', 'Basis Trading'],
@@ -24,24 +24,24 @@
   var EXCHANGE = /^(Binance|Coinbase|Bybit|Kraken|Bitget|OKX|Bitfinex|Gemini)/;
 
   var CONST = {
-    shrink_k: 5,            // pseudo-peers pulling a thin category toward its family, a family toward all
-    peer_min: 0.01,
-    peer_max: 5,
-    multiple_min: 0.03,
-    multiple_max: 3,
+    ridge_lambda: 3,        // ridge penalty on the fitted terms (not the intercept), chosen on held-out error
+    size_center: 18,        // ln TVL is centred here (about $66M) so the intercept reads as a mid-size cap
     growth_floor: -50,
     growth_cap: 100,
-    growth_weight: 0.35,    // momentum = exp(weight * tanh(growth / 30))
+    growth_weight: 0.2,     // momentum = exp(weight * tanh(growth / 30)): at most about ±20%
     ramp_days: 540,         // maturity climbs to its peak over the first 18 months
     peak_until: 1095,       // and holds it to 3 years
     fade_until: 2190,       // then fades to its floor by 6 years with no token
-    maturity_start: 0.7,
-    maturity_peak: 1.15,
-    maturity_old: 0.85,
-    reach_step: 0.03,       // +3% for each chain past the first, at most ten
+    maturity_start: 0.8,
+    maturity_peak: 1.1,
+    maturity_old: 0.9,
+    odds_k: 5,              // pseudo-protocols pulling a thin category or age band toward the whole field
     airdrop_share: 0.075,   // share of a launch's value a points campaign typically hands out
-    capital_usd: 500        // the stake every farm plan is costed at
+    capital_usd: 500,       // the stake every farm plan is costed at
+    farm_ratio: 3,          // expected drop at least 3x the plan's fees: farm
+    thin_ratio: 1           // at least 1x: thin; below: skip
   };
+  var FAMS = ['vaults', 'credit', 'trading', 'realworld', 'network'];
 
   function median(a) {
     if (!a.length) return NaN;
@@ -100,56 +100,111 @@
       if (!lead) return;
       var tvl = group.reduce(function (s, p) { return s + p.tvl_usd; }, 0);
       if (tvl <= 0) return;
-      out.push({ slug: lead.slug, name: lead.name, symbol: lead.symbol || key, category: lead.category, chains: lead.chains, change_7d: lead.change_7d,
+      out.push({ slug: lead.slug, name: lead.name, symbol: lead.symbol || key, category: lead.category, chains: lead.chains, change_7d: lead.change_7d, listed_at: lead.listed_at,
         mcap_usd: lead.mcap_usd, tvl_usd: tvl, products: group.length, multiple: lead.mcap_usd / tvl });
     });
     return out.sort(function (a, b) { return b.mcap_usd - a.mcap_usd; });
   }
 
-  // Peer multiples (market cap / TVL) from the snapshot's own live tokens, shrunk in log space:
-  // category -> family -> every live token.
-  function calibrate(protocols, live) {
-    // Each peer's multiple is held to [peer_min, peer_max] first, so one outlier cannot carry a category.
-    var logs = live.map(function (t) { return Math.log(clamp(t.multiple, CONST.peer_min, CONST.peer_max)); });
-    var all = median(logs);
-    var byFam = {}, byCat = {}, rawCat = {};
-    live.forEach(function (t, i) {
-      (byFam[familyOf(t.category)] = byFam[familyOf(t.category)] || []).push(logs[i]);
-      (byCat[t.category] = byCat[t.category] || []).push(logs[i]);
-      (rawCat[t.category] = rawCat[t.category] || []).push(t.multiple);
-    });
-    var k = CONST.shrink_k;
-    function shrink(xs, prior) { return xs && xs.length ? (xs.length * median(xs) + k * prior) / (xs.length + k) : prior; }
-    var fam = {};
-    Object.keys(FAMILY).concat(['other']).forEach(function (f) { fam[f] = shrink(byFam[f], all); });
-    var cats = {};
-    protocols.forEach(function (p) {
-      var c = p.category;
-      if (c in cats) return;
-      var xs = byCat[c] || [];
-      cats[c] = {
-        category: c,
-        family: familyOf(c),
-        peers: xs.length,
-        raw: xs.length ? median(rawCat[c]) : null,
-        family_multiple: Math.exp(fam[familyOf(c)]),
-        multiple: clamp(Math.exp(shrink(xs, fam[familyOf(c)])), CONST.multiple_min, CONST.multiple_max)
-      };
-    });
-    return { global: Math.exp(all), live: live.length, families: Object.keys(fam).reduce(function (o, f) { o[f] = Math.exp(fam[f]); return o; }, {}), categories: cats };
+  // ---------------------------------------------------------------- the value fit
+
+  // The fitted core: ln(market cap) = a + b ln(TVL) + a family level, by ridge least squares over the
+  // snapshot's traded tokens. b < 1 is the size curve: a small protocol's cap is a larger multiple of
+  // its TVL than a large one's.
+  function features(tvl, category) {
+    var x = [1, Math.log(tvl) - CONST.size_center];
+    var f = familyOf(category);
+    FAMS.forEach(function (name) { x.push(f === name ? 1 : 0); });
+    return x;
+  }
+  function dot(w, x) { var s = 0; for (var i = 0; i < x.length; i++) s += w[i] * x[i]; return s; }
+
+  // Solve (X'X + lambda I') w = X'y by Gaussian elimination with partial pivoting.
+  function ridge(X, y, lambda) {
+    var k = X[0].length, A = [], i, j, r;
+    for (i = 0; i < k; i++) {
+      A.push([]);
+      for (j = 0; j <= k; j++) {
+        var v = 0;
+        for (r = 0; r < X.length; r++) v += X[r][i] * (j < k ? X[r][j] : y[r]);
+        A[i].push(v + (i === j && i > 0 ? lambda : 0));
+      }
+    }
+    for (i = 0; i < k; i++) {
+      var piv = i;
+      for (r = i + 1; r < k; r++) if (Math.abs(A[r][i]) > Math.abs(A[piv][i])) piv = r;
+      var t = A[i]; A[i] = A[piv]; A[piv] = t;
+      for (r = 0; r < k; r++) {
+        if (r === i) continue;
+        var m = A[r][i] / A[i][i];
+        for (j = i; j <= k; j++) A[r][j] -= m * A[i][j];
+      }
+    }
+    return A.map(function (row, n) { return row[k] / row[n]; });
   }
 
-  // Launch odds: the share of a category's protocols in the snapshot that already record a token
-  // (Laplace-smoothed). Shown beside the value, never folded into it.
-  function launchOdds(protocols) {
-    var t = {}, n = {};
-    protocols.forEach(function (p) {
-      n[p.category] = (n[p.category] || 0) + 1;
-      if (tokenStatus(p) !== 'pre') t[p.category] = (t[p.category] || 0) + 1;
+  // Held-out error of a predictor: each traded token is predicted by a fit that never saw it.
+  function heldOut(live, predictWithout) {
+    var err = live.map(function (t, i) {
+      var rest = live.filter(function (_, j) { return j !== i; });
+      return Math.abs(predictWithout(rest, t) - Math.log(t.mcap_usd));
     });
-    var odds = {};
-    Object.keys(n).forEach(function (c) { odds[c] = ((t[c] || 0) + 1) / (n[c] + 2); });
-    return odds;
+    return { factor: Math.exp(median(err)), within3: err.filter(function (e) { return e < Math.log(3); }).length / err.length, errors: err };
+  }
+
+  function fitValue(live) {
+    var lam = CONST.ridge_lambda;
+    function fitOn(set) { return ridge(set.map(function (t) { return features(t.tvl_usd, t.category); }), set.map(function (t) { return Math.log(t.mcap_usd); }), lam); }
+    var w = fitOn(live);
+    var model = heldOut(live, function (rest, t) { return dot(fitOn(rest), features(t.tvl_usd, t.category)); });
+    // The two simpler rules it has to beat on the same held-out tokens.
+    var flat = heldOut(live, function (rest, t) { return Math.log(t.tvl_usd) + median(rest.map(function (u) { return Math.log(u.multiple); })); });
+    var sizeOnly = heldOut(live, function (rest, t) {
+      var ws = ridge(rest.map(function (u) { return [1, Math.log(u.tvl_usd) - CONST.size_center]; }), rest.map(function (u) { return Math.log(u.mcap_usd); }), lam);
+      return ws[0] + ws[1] * (Math.log(t.tvl_usd) - CONST.size_center);
+    });
+    var points = live.map(function (t, i) { return { name: t.name, family: familyOf(t.category), actual: t.mcap_usd, fitted: Math.exp(dot(w, features(t.tvl_usd, t.category))), held_out_error: model.errors[i] }; });
+    var levels = {};
+    FAMS.forEach(function (f, i) { levels[f] = w[2 + i]; });
+    levels.other = 0;
+    return {
+      weights: w, intercept: w[0], size_elasticity: w[1], family_levels: levels, tokens: live.length,
+      held_out: { model: model.factor, model_within3: model.within3, flat: flat.factor, flat_within3: flat.within3, size_only: sizeOnly.factor, size_only_within3: sizeOnly.within3 },
+      points: points
+    };
+  }
+
+  // ---------------------------------------------------------------- launch odds
+
+  // The share of comparable protocols that already record a token: by category and by how long
+  // DefiLlama has tracked them, each smoothed toward the whole snapshot, combined on the log-odds scale.
+  var AGE_BANDS = [[0, 365, 'under 1 year'], [365, 730, '1 to 2 years'], [730, 1460, '2 to 4 years'], [1460, 1e9, '4 years or more']];
+  function ageBand(age) {
+    if (age === null) return 'unlisted';
+    for (var i = 0; i < AGE_BANDS.length; i++) if (age < AGE_BANDS[i][1]) return AGE_BANDS[i][2];
+    return AGE_BANDS[AGE_BANDS.length - 1][2];
+  }
+  function logit(p) { return Math.log(p / (1 - p)); }
+  function launchOdds(protocols, asOf) {
+    var all = { t: 0, n: 0 }, cat = {}, band = {};
+    protocols.forEach(function (p) {
+      var has = tokenStatus(p) !== 'pre' ? 1 : 0;
+      var b = ageBand(ageDays(asOf, p.listed_at));
+      all.t += has; all.n++;
+      cat[p.category] = cat[p.category] || { t: 0, n: 0 }; cat[p.category].t += has; cat[p.category].n++;
+      band[b] = band[b] || { t: 0, n: 0 }; band[b].t += has; band[b].n++;
+    });
+    var base = all.t / all.n, k = CONST.odds_k;
+    function shrunk(c) { return c ? (c.t + k * base) / (c.n + k) : base; }
+    return {
+      base: base,
+      bands: AGE_BANDS.map(function (b) { return { band: b[2], share: shrunk(band[b[2]]), n: band[b[2]] ? band[b[2]].n : 0 }; }),
+      of: function (category, age) {
+        var c = shrunk(cat[category]), a = shrunk(band[ageBand(age)]);
+        var z = logit(c) + logit(a) - logit(base);
+        return { odds: 1 / (1 + Math.exp(-z)), category: c, age: a, band: ageBand(age) };
+      }
+    };
   }
 
   function momentum(change) {
@@ -165,8 +220,6 @@
     if (age <= C.fade_until) return C.maturity_peak - (C.maturity_peak - C.maturity_old) * (age - C.peak_until) / (C.fade_until - C.peak_until);
     return C.maturity_old;
   }
-
-  function reach(chains) { return 1 + CONST.reach_step * Math.min(Math.max(chains - 1, 0), 10); }
 
   // ---------------------------------------------------------------- farm plans
 
@@ -223,15 +276,36 @@
     return { chain: chain, capital: capital, hold_days: book.hold, steps: steps, setup_cost: Math.max(1, capital * 0.001) + gas * 5, monthly_cost: gas * 8 };
   }
 
+  // The plan's last step states its verdict in dollars, so the board.json row carries it too.
+  function verdictStep(v, plan) {
+    var head = v.call === 'farm' ? 'Verdict: farm' : v.call === 'thin' ? 'Verdict: thin, farm only with spare capital' : 'Verdict: skip at this stake';
+    var be = v.breakeven_stake_usd === null ? '' : '; fees are covered from a stake of about ' + usd(v.breakeven_stake_usd);
+    return { text: head + '. The ' + usd(plan.capital) + ' stake can expect about ' + usd(v.expected_usd) + ' of drop, odds-weighted, against ' + usd(v.fees_usd) + ' of fees over ' + plan.hold_days + ' days' + be, cost: usd(v.fees_usd) + ' in all', time: plan.hold_days + ' days' };
+  }
+
   function stepText(s) { return s.text + '. Cost: ' + s.cost + '. Time: ' + s.time + '.'; }
+
+  // Farm, thin or skip: the drop the stake can expect (value x airdrop share x stake's share of TVL x
+  // launch odds) against everything the plan costs over its hold.
+  function verdict(plan, implied, tvl, odds) {
+    var perDollar = implied * CONST.airdrop_share / tvl * odds;
+    var expected = plan.capital * perDollar;
+    var fees = plan.setup_cost + plan.monthly_cost * plan.hold_days / 30;
+    var ratio = expected / fees;
+    return {
+      expected_usd: expected, fees_usd: fees, ratio: ratio,
+      call: ratio >= CONST.farm_ratio ? 'farm' : ratio >= CONST.thin_ratio ? 'thin' : 'skip',
+      breakeven_stake_usd: perDollar > 0 ? fees / perDollar : null
+    };
+  }
 
   // ---------------------------------------------------------------- the radar
 
   function build(snapshot) {
     var protocols = snapshot.protocols;
     var live = liveTokens(protocols);
-    var cal = calibrate(protocols, live);
-    var odds = launchOdds(protocols);
+    var fit = fitValue(live);
+    var odds = launchOdds(protocols, snapshot.as_of);
     var sib = siblings(protocols);
     var watch = {};
     snapshot.watchlist.forEach(function (s) { watch[s] = true; });
@@ -239,36 +313,42 @@
     protocols.forEach(function (p) {
       var status = tokenStatus(p);
       if (status === 'live') return;
-      if (status === 'recorded') { aside.push({ slug: p.slug, name: p.name, reason: 'token on record (' + (p.symbol || p.gecko_id) + '), no market cap' }); return; }
+      if (status === 'recorded') { aside.push({ slug: p.slug, name: p.name, reason: 'token on record, no market cap' }); return; }
       var sibling = sib[brandOf(p.name)] || null;
       var why = watch[p.slug] ? null : setAsideReason(p) || (sibling ? 'sibling of a token that trades' : null);
       if (why) { aside.push({ slug: p.slug, name: p.name, reason: why }); return; }
-      var cat = cal.categories[p.category];
       var age = ageDays(snapshot.as_of, p.listed_at);
+      var core = Math.exp(dot(fit.weights, features(p.tvl_usd, p.category)));
       var mo = momentum(p.change_7d);
       var ma = maturity(age);
-      var re = reach(p.chains.length);
-      var implied = Math.max(1, Math.round(p.tvl_usd * cat.multiple * mo.mult * ma * re));
+      var implied = Math.max(1, Math.round(core * mo.mult * ma));
+      var od = odds.of(p.category, age);
       var plan = farmPlan(p);
       rows.push({
-        slug: p.slug, name: p.name, category: p.category, family: cat.family, chains: p.chains,
+        slug: p.slug, name: p.name, category: p.category, family: familyOf(p.category), chains: p.chains,
         tvl_usd: p.tvl_usd, change_7d: p.change_7d, listed_at: p.listed_at, age_days: age,
         tier: watch[p.slug] ? 'watchlist' : 'early',
         token_status: 'pre-token',
         sibling: sibling,
         implied_value_usd: implied,
-        model: { peer_multiple: cat.multiple, peers: cat.peers, growth_pct: mo.growth, momentum: mo.mult, maturity: ma, reach: re },
-        launch_odds: odds[p.category],
+        range_usd: [Math.round(implied / fit.held_out.model), Math.round(implied * fit.held_out.model)],
+        model: { fitted_core: core, implied_multiple: core / p.tvl_usd, family_level: fit.family_levels[familyOf(p.category)], growth_pct: mo.growth, momentum: mo.mult, maturity: ma },
+        launch_odds: od.odds,
+        odds_parts: od,
         airdrop_per_1k: implied * CONST.airdrop_share * 1000 / p.tvl_usd,
         plan: plan,
-        farm_steps: plan.steps.map(stepText)
+        verdict: verdict(plan, implied, p.tvl_usd, od.odds),
+        farm_steps: null
       });
+      var row = rows[rows.length - 1];
+      plan.steps.push(verdictStep(row.verdict, plan));
+      row.farm_steps = plan.steps.map(stepText);
     });
     rows.sort(function (a, b) { return b.implied_value_usd - a.implied_value_usd || b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : 1); });
     rows.forEach(function (r, i) { r.rank = i + 1; });
-    return { rows: rows, live: live, aside: aside, calibration: cal, constants: CONST };
+    return { rows: rows, live: live, aside: aside, fit: fit, odds: odds, constants: CONST, protocols: protocols.length };
   }
 
-  var api = { build: build, liveTokens: liveTokens, calibrate: calibrate, farmPlan: farmPlan, stepText: stepText, momentum: momentum, maturity: maturity, reach: reach, tokenStatus: tokenStatus, familyOf: familyOf, CONST: CONST, VERSION: 'radar-peer-1' };
+  var api = { build: build, liveTokens: liveTokens, fitValue: fitValue, farmPlan: farmPlan, verdict: verdict, stepText: stepText, momentum: momentum, maturity: maturity, tokenStatus: tokenStatus, familyOf: familyOf, CONST: CONST, VERSION: 'radar-fit-2' };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.RadarModel = api;
 })(this);

@@ -7,6 +7,6 @@ url="file://$PWD/out/dashboard/index.html"
 shot() { "$chrome" --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=1 --window-size=1440,900 --screenshot="$dir/$1" "$url$2" 2>/dev/null; }
 shot 1-board.png '#board'
 shot 2-detail.png '#p/curvance'
-shot 3-filtered.png '#board?chain=Solana&tier=early&sort=per1k&dir=desc'
+shot 3-filtered.png '#board?call=farm&tvl=10000000&sort=ratio&dir=desc'
 shot 4-model.png '#model'
 ls -l "$dir"
