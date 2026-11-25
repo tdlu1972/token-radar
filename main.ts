@@ -74,6 +74,7 @@ const board = rows.map((r: any) => ({
     age_x: Number(r.model.parts.age.toFixed(4)),
   },
   launch_odds: Number(r.launch_odds.toFixed(4)),
+  odds_peers: r.odds_parts.parts.map((q: { label: string; bucket: string; share: number }) => ({ by: q.label, peers: q.bucket, share: Number(q.share.toFixed(4)) })),
   farm: {
     chain: r.plan.chain,
     capital_usd: r.plan.capital,
@@ -88,7 +89,9 @@ const board = rows.map((r: any) => ({
 
 mkdirSync(out, { recursive: true });
 const fit = { tokens: radar.fit.tokens, terms: radar.fit.terms, coef: radar.fit.coef, intercept: radar.fit.intercept, size_elasticity: radar.fit.size_elasticity, family_levels: radar.fit.family_levels, held_out: radar.fit.held_out, selection: radar.fit.selection };
-writeFileSync(join(out, 'board.json'), `${JSON.stringify({ model: Model.VERSION, as_of: snapshot.as_of, source: snapshot.source, constants: Model.CONST, fit, rows: board })}\n`);
+const o = radar.odds;
+const odds = { base: o.base, terms: o.terms, log_loss: o.loss, base_log_loss: o.base_loss, selection: o.selection, calibration: o.calibration };
+writeFileSync(join(out, 'board.json'), `${JSON.stringify({ model: Model.VERSION, as_of: snapshot.as_of, source: snapshot.source, constants: Model.CONST, fit, odds, rows: board })}\n`);
 
 // The page gets the snapshot itself and runs the model on it.
 const page = { as_of: snapshot.as_of, source: snapshot.source, floor_usd: snapshot.floor_usd, watchlist: snapshot.watchlist, protocols: snapshot.protocols };
