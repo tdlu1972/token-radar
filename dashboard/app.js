@@ -117,17 +117,23 @@ function seg(name, value, opts) {
 }
 function tally(call) { return rows.filter(r => r.verdict.call === call).length; }
 
+// The best farms on the board: the drop most times its fees.
+function picks() {
+  var top = rows.filter(r => r.verdict.call === 'farm').sort((a, b) => b.verdict.ratio - a.verdict.ratio).slice(0, 4);
+  return '<div class="picks">' + top.map(r => '<a href="#p/' + esc(r.slug) + '"><span>Best farm · #' + r.rank + '</span><b>' + esc(r.name) + '</b><span>' + esc(r.category) + ' on ' + esc(r.plan.chain) + ' · ' + share(r.launch_odds) + ' odds</span><em>' + r.verdict.ratio.toFixed(1) + '× fees: ' + money(r.verdict.expected_usd) + ' vs ' + money(r.verdict.fees_usd) + '</em></a>').join('') + '</div>';
+}
+
 function renderBoard(st) {
   var list = filtered(st);
   var watch = rows.filter(r => r.tier === 'watchlist').length;
   var total = list.reduce((s, r) => s + r.implied_value_usd, 0);
   var active = Object.keys(DEFAULT).some(k => k !== 'sort' && k !== 'dir' && st[k] !== DEFAULT[k]);
   var html = '<section class="hero"><div><h1>' + rows.length + ' protocols with no token on record, ranked by what a launch would be worth</h1>' +
-    '<p class="lede">Implied value is the market cap the snapshot\'s ' + F.tokens + ' traded tokens put on a protocol of this TVL (a fitted size curve: cap grows as TVL<sup>' + F.size_elasticity.toFixed(2) + '</sup>), plus every snapshot term that earned its place on held-out tokens: ' + keptText() + '. Every watchlist protocol is here, with ' + (rows.length - watch) + ' early ones below the $50M floor held to the same rule. A model\'s estimate, not a price.</p></div>' +
+    '<p class="lede">Value: the cap ' + F.tokens + ' traded tokens put on this TVL (cap ∝ TVL<sup>' + F.size_elasticity.toFixed(2) + '</sup>) with the terms that beat it held-out: ' + keptText() + '. Verdict: whether a ' + money(M.CONST.capital_usd) + ' farm pays its fees. All watchlist protocols, plus ' + (rows.length - watch) + ' early ones under the $50M floor.</p></div>' +
     '<dl class="kpis"><div><dt>Watchlist covered</dt><dd>' + watch + ' / ' + snap.watchlist.length + '</dd></div>' +
     '<div><dt>Held-out miss, median</dt><dd>' + mult(F.held_out.model) + '</dd></div>' +
     '<div><dt>Farm · thin · skip</dt><dd>' + tally('farm') + ' · ' + tally('thin') + ' · ' + tally('skip') + '</dd></div>' +
-    '<div><dt>Traded tokens fitted</dt><dd>' + F.tokens + '</dd></div></dl></section>' + integrity();
+    '<div><dt>Traded tokens fitted</dt><dd>' + F.tokens + '</dd></div></dl></section>' + integrity() + picks();
   html += '<form class="filters" id="filters" onsubmit="return false">' +
     '<label class="grow">Search<input name="q" type="search" placeholder="Name, category or chain" value="' + esc(st.q) + '"></label>' +
     '<label>Category<select name="cat">' + options(countBy('category'), st.cat, 'All categories') + '</select></label>' +
@@ -136,7 +142,7 @@ function renderBoard(st) {
     '<div class="field"><span>Tier</span>' + seg('tier', st.tier, [['all', 'All'], ['watchlist', 'Watchlist'], ['early', 'Early']]) + '</div>' +
     '<div class="field"><span>Farm verdict</span>' + seg('call', st.call, [['all', 'All'], ['farm', 'Farm'], ['thin', 'Thin'], ['skip', 'Skip']]) + '</div></form>';
   html += '<div class="summary"><span><b>' + list.length + '</b> of ' + rows.length + ' rows' + (active ? ' match the filters' : '') + ' · combined implied value <b>' + money(total) + '</b></span>' +
-    (active ? '<a href="#board" class="reset">Clear filters</a>' : '<span class="dim">Select a row for its value build-up, odds and farm plan · click a column to sort</span>') + '</div>';
+    (active ? '<a href="#board" class="reset">Clear filters</a>' : '<span class="dim">Select a row for its value build-up and farm plan · click a column to sort</span>') + '</div>';
   html += '<div class="table-wrap"><table class="board"><thead><tr>' + COLS.map(c => {
     var on = st.sort === c.key;
     return '<th class="' + (c.num ? 'num ' : '') + (on ? 'sorted' : '') + '" data-sort="' + c.key + '">' + c.label + (on ? (st.dir === 'asc' ? ' ▲' : ' ▼') : '') + '</th>';
@@ -145,7 +151,7 @@ function renderBoard(st) {
     var w = Math.max(2, Math.round(100 * Math.sqrt(r.implied_value_usd / maxValue)));
     return '<tr data-slug="' + esc(r.slug) + '">' +
       '<td class="num rank">' + r.rank + '</td>' +
-      '<td><div class="name">' + esc(r.name) + (r.tier === 'watchlist' ? ' <i class="tag w">watchlist</i>' : ' <i class="tag e">early</i>') + (r.sibling ? ' <i class="tag s" title="' + esc(r.sibling.name) + ' records ' + esc(r.sibling.symbol) + '">sibling ' + esc(r.sibling.symbol) + '</i>' : '') + '</div><div class="sub">' + esc(r.category) + ' · ' + esc(chainsLine(r.chains)) + '</div></td>' +
+      '<td><div class="name">' + esc(r.name) + (r.tier === 'watchlist' ? ' <i class="tag w">watchlist</i>' : ' <i class="tag e">early</i>') + (r.sibling ? ' <i class="tag s" title="' + esc(r.sibling.name) + ' records ' + esc(r.sibling.symbol) + '">sibling ' + esc(r.sibling.symbol) + '</i>' : '') + (r.native_chain ? ' <i class="tag s">' + esc(r.native_chain) + ' venue</i>' : '') + '</div><div class="sub">' + esc(r.category) + ' · ' + esc(chainsLine(r.chains)) + '</div></td>' +
       num(money(r.tvl_usd)) +
       num(pct(r.change_7d)) +
       num(age(r.age_days)) +
@@ -214,7 +220,7 @@ function renderDetail(slug) {
   var html = '<nav class="crumbs"><a href="' + hashOf(state) + '">← Board</a>' + (prev ? '<a href="#p/' + esc(prev.slug) + '">↑ #' + prev.rank + ' ' + esc(prev.name) + '</a>' : '') + (next ? '<a href="#p/' + esc(next.slug) + '">↓ #' + next.rank + ' ' + esc(next.name) + '</a>' : '') + '</nav>';
   html += '<section class="dhead"><div><p class="eyebrow">Rank ' + r.rank + ' of ' + rows.length + ' · ' + (r.tier === 'watchlist' ? 'watchlist' : 'early, below the $50M floor') + ' · no token on record</p><h1>' + esc(r.name) + '</h1>' +
     '<p class="lede">' + esc(r.category) + ' on ' + esc(r.chains.join(', ')) + (r.listed_at ? ' · tracked since ' + esc(r.listed_at) : '') + '</p>' +
-    (r.sibling ? '<p class="warn">Sibling token: ' + esc(r.sibling.name) + ' already records ' + esc(r.sibling.symbol) + '. A launch here may reuse it rather than issue a new one.</p>' : '') + '</div>' +
+    (r.sibling ? '<p class="warn">Sibling token: ' + esc(r.sibling.name) + ' already records ' + esc(r.sibling.symbol) + '. A launch here may reuse it rather than issue a new one.</p>' : '') + (r.native_chain ? '<p class="warn">Venue of its own chain, ' + esc(r.native_chain) + ': a reward is likelier paid in the chain\'s token than in a new one.</p>' : '') + '</div>' +
     '<dl class="kpis four"><div><dt>Implied value</dt><dd>' + money(r.implied_value_usd) + '</dd><small>' + money(r.range_usd[0]) + '–' + money(r.range_usd[1]) + '</small></div><div><dt>TVL</dt><dd>' + money(r.tvl_usd) + '</dd><small>' + pct(r.change_7d) + ' in 7 days</small></div><div><dt>Launch odds</dt><dd>' + share(r.launch_odds) + '</dd><small>from peers\' record</small></div><div><dt>Farm verdict</dt><dd class="v ' + v.call + '">' + v.call + '</dd><small>' + VERDICT_NOTE[v.call] + '</small></div></dl></section>';
   html += '<div class="detail"><div>';
   html += '<section class="card"><h3>How the value is built</h3><ol class="build">' + build.map(b => {
@@ -236,7 +242,7 @@ function renderDetail(slug) {
 // --- live tokens
 
 function renderLive() {
-  var html = '<section class="hero slim"><div><h1>' + R.live.length + ' tokens that already trade</h1><p class="lede">Kept off the board and shown at the market\'s own value, one row per ticker: where several products carry one token, its TVL is theirs summed. These are what the value model is fitted on; the last column is each token\'s held-out miss, from a fit that never saw it.</p></div></section>';
+  var html = '<section class="hero slim"><div><h1>' + R.live.length + ' tokens that already trade</h1><p class="lede">The value model\'s training set, one row per ticker (products sharing a token sum their TVL). The last column is each token\'s miss from a fit that never saw it.</p></div></section>';
   html += '<div class="table-wrap"><table class="board live"><thead><tr><th>Token</th><th>Category</th><th class="num">TVL</th><th class="num">Market cap</th><th class="num">Cap ÷ TVL</th><th class="num">Model fit</th><th class="num">Held-out miss</th></tr></thead><tbody>' +
     R.live.map((l, i) => {
       var pt = F.points[i];
@@ -271,18 +277,20 @@ function validationChart() {
   return s + '<text class="axis" x="' + (W - P) + '" y="' + (H - 26) + '" style="text-anchor:end">model fit →</text><text class="axis l" x="' + (P + 4) + '" y="' + (P - 10) + '">↑ actual market cap</text></svg>';
 }
 
+// Held-out calibration: each odds band's mean odds (dim) beside the share that does record a token.
 function oddsChart() {
-  var bands = R.odds.bands, W = 560, H = 150, P = 28, bw = (W - 2 * P) / bands.length;
-  var s = '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Share recording a token by age">';
-  bands.forEach((b, i) => {
-    var h = b.share * (H - 2 * P), x = P + i * bw + 10;
-    s += '<rect class="barv" x="' + x + '" y="' + (H - P - h) + '" width="' + (bw - 20) + '" height="' + h + '"/><text x="' + (x + (bw - 20) / 2) + '" y="' + (H - P - h - 6) + '">' + share(b.share) + '</text><text x="' + (x + (bw - 20) / 2) + '" y="' + (H - 10) + '">' + esc(b.band) + ' (' + b.n + ')</text>';
+  var cal = R.odds.calibration, W = 560, H = 150, P = 28, bw = (W - 2 * P) / cal.length;
+  var s = '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Held-out odds against the share that records a token">';
+  cal.forEach((c, i) => {
+    var x = P + i * bw + 14, w = (bw - 28) / 2;
+    [c.odds, c.share].forEach((v, j) => { var h = v * (H - 2 * P); s += '<rect class="barv' + (j ? '' : ' dim') + '" x="' + (x + j * w) + '" y="' + (H - P - h) + '" width="' + (w - 2) + '" height="' + h + '"/><text x="' + (x + j * w + w / 2) + '" y="' + (H - P - h - 6) + '">' + share(v) + '</text>'; });
+    s += '<text x="' + (x + w) + '" y="' + (H - 10) + '">odds ' + share(i / 4) + '–' + share(c.hi) + ' (' + c.n + ')</text>';
   });
   return s + '</svg>';
 }
 
 function formula() {
-  var C = M.CONST, c = F.coef, pad = t => (t + '                                ').slice(0, 34);
+  var C = M.CONST, c = F.coef, pad = t => t.padEnd(34);
   var lines = ['ln cap = ' + F.intercept.toFixed(3), '       ' + pad('+ ' + F.size_elasticity.toFixed(3) + ' × (ln TVL − ' + C.size_center + ')') + 'size curve'];
   if (F.terms.includes('family')) lines.push('       ' + pad('+ family level') + 'fitted, see below');
   if (F.terms.includes('growth')) lines.push('       ' + pad('+ ' + c.growth.toFixed(3) + ' × tanh(7d % ÷ 30)') + '7-day growth');
@@ -298,24 +306,22 @@ function renderModel() {
   var aside = {};
   R.aside.forEach(a => { aside[a.reason] = (aside[a.reason] || 0) + 1; });
   var fams = Object.keys(F.family_levels).sort((a, b) => F.family_levels[b] - F.family_levels[a]);
-  var html = '<section class="hero slim"><div><h1>The model: ' + esc(M.VERSION) + '</h1><p class="lede">One file, model.js, fits and scores everything from the snapshot\'s own figures; no protocol name is special-cased. main.ts runs the same file to write board.json, and this page re-runs it and checks every row against that board.</p></div></section>';
+  var html = '<section class="hero slim"><div><h1>The model: ' + esc(M.VERSION) + '</h1><p class="lede">One file, model.js, fits and scores everything from the snapshot\'s own figures. main.ts runs it to write board.json; this page re-runs it and checks every row against that board.</p></div></section>';
   html += '<div class="grid2"><section class="card"><h3>Formula</h3><pre>' + formula() + '</pre>' +
     '<h3>Held-out test</h3><p class="note">Each traded token is priced by a fit that never saw it. Median miss, and the share priced within 3×:</p><table class="mini"><thead><tr><th>Rule</th><th class="num">Median miss</th><th class="num">Within 3×</th></tr></thead><tbody>' +
     '<tr><td>Flat multiple (median cap ÷ TVL)</td>' + num(mult(h.flat)) + num(share(h.flat_within3)) + '</tr>' +
     '<tr><td>Size curve alone</td>' + num(mult(h.size_only)) + num(share(h.size_only_within3)) + '</tr>' +
     '<tr class="used"><td>Size curve + ' + F.terms.map(t => verdictOf(t).label).join(' + ') + ' (used)</td>' + num(mult(h.model)) + num(share(h.model_within3)) + '</tr></tbody></table>' +
     (h.forward ? '<h3>Second blind test, forward in time</h3><p class="note">The whole procedure, selection included, re-run on the ' + h.forward.train + ' oldest dated tokens (it kept ' + (h.forward.terms.join(' and ') || 'the size curve alone') + ') and scored on the ' + h.forward.test + ' listed since ' + esc(h.forward.from) + ': median miss <b>' + mult(h.forward.model) + '</b>, flat multiple <b>' + mult(h.forward.flat) + '</b>.</p>' : '') +
-    '<h3>Every candidate term, kept or dropped</h3><p class="note">Forward selection on the same held-out test: a term stays only if it cuts the median miss by ' + share(C.keep_gain) + ' or more over the terms already in. Mean log miss shown beside it, so a term that helps the median but not the tail is visible.</p><table class="mini"><thead><tr><th>Term</th><th class="num">Without</th><th class="num">With</th><th class="num">Mean ln miss</th><th>Call</th></tr></thead><tbody>' +
+    '<h3>Every candidate term, kept or dropped</h3><p class="note">Forward selection on the same test: a term stays only if it cuts the median miss by ' + share(C.keep_gain) + ' or more. Mean log miss beside it shows the tail.</p><table class="mini"><thead><tr><th>Term</th><th class="num">Without</th><th class="num">With</th><th class="num">Mean ln miss</th><th>Call</th></tr></thead><tbody>' +
     F.selection.map(v => '<tr' + (v.kept ? ' class="used"' : '') + '><td>' + esc(v.label) + '</td>' + num(mult(v.without)) + num(mult(v.with)) + num(v.mean_without.toFixed(3) + ' → ' + v.mean_with.toFixed(3)) + '<td>' + (v.kept ? 'kept' : 'dropped') + '</td></tr>').join('') + '</tbody></table></section>' +
     '<section class="card"><h3>Fit against the market</h3>' + validationChart() + '<p class="legend">' + ['vaults', 'credit', 'trading', 'realworld', 'network', 'other'].map(f => '<span><i class="dot-key ' + f + '"></i>' + f + '</span>').join('') + '</p><p class="note">Shaded: within the median miss, ' + mult(h.model) + ', of the diagonal.</p></section>' +
     '<section class="card"><h3>Family levels</h3><table class="mini"><thead><tr><th>Family</th><th class="num">Level</th><th class="num">Traded tokens</th><th class="num">Board rows</th></tr></thead><tbody>' +
     fams.map(f => '<tr><td>' + esc(f) + '</td>' + num(mult(Math.exp(F.family_levels[f]))) + num(R.live.filter(l => M.familyOf(l.category) === f).length) + num(rows.filter(r => r.family === f).length) + '</tr>').join('') + '</tbody></table>' +
     '<h3>Set aside, not ranked</h3><table class="mini"><tbody>' + Object.keys(aside).sort((a, b) => aside[b] - aside[a]).map(k => '<tr><td>' + esc(k) + '</td>' + num(aside[k]) + '</tr>').join('') + '</tbody></table></section>' +
-    '<section class="card"><h3>Launch odds: who already records a token, by age</h3>' + oddsChart() + '<p class="note">A protocol\'s odds combine its peers\' shares on the log-odds scale, each smoothed toward the snapshot\'s ' + share(R.odds.base) + '. A grouping stays only if it cuts the log loss by ' + share(C.keep_gain) + ' with each of ' + snap.protocols.length + ' protocols scored out of its own counts. Odds rank likelihood from who has a token; they are not a date.</p><table class="mini"><thead><tr><th>Peer grouping</th><th class="num">Log loss without</th><th class="num">With</th><th>Call</th></tr></thead><tbody>' +
+    '<section class="card"><h3>Launch odds, calibrated held-out</h3>' + oddsChart() + '<p class="note">A protocol\'s odds combine its peers\' shares on the log-odds scale, each smoothed toward the snapshot\'s ' + share(R.odds.base) + '. A grouping stays only if it cuts the log loss by ' + share(C.keep_gain) + ' with each of ' + snap.protocols.length + ' protocols scored out of its own counts. Odds rank likelihood from who has a token; they are not a date.</p><table class="mini"><thead><tr><th>Peer grouping</th><th class="num">Log loss without</th><th class="num">With</th><th>Call</th></tr></thead><tbody>' +
     R.odds.selection.map(v => '<tr' + (v.kept ? ' class="used"' : '') + '><td>' + esc(v.label) + '</td>' + num(v.without.toFixed(3)) + num(v.with.toFixed(3)) + '<td>' + (v.kept ? 'kept' : 'dropped') + '</td></tr>').join('') + '</tbody></table>' +
-    '<h3>Calibration, held-out</h3><table class="mini"><thead><tr><th>Odds band</th><th class="num">Protocols</th><th class="num">Mean odds</th><th class="num">Record a token</th></tr></thead><tbody>' +
-    R.odds.calibration.map((c, i) => '<tr><td>' + share(i / 4) + '–' + share(c.hi) + '</td>' + num(c.n) + num(share(c.odds)) + num(share(c.share)) + '</tr>').join('') + '</tbody></table>' +
-    '<p class="note">Odds drive the farm verdict: farm at ≥' + C.farm_ratio + '× fees, thin at ≥' + C.thin_ratio + '×, else skip.</p></section></div>';
+    '<p class="note">Above: mean odds (dim) and the share that records a token, per band. Odds drive the farm verdict: farm at ≥' + C.farm_ratio + '× fees, thin at ≥' + C.thin_ratio + '×, else skip.</p></section></div>';
   app.innerHTML = html;
 }
 

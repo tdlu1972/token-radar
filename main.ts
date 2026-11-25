@@ -58,6 +58,7 @@ const board = rows.map((r: any) => ({
   tier: r.tier,
   token_status: r.token_status,
   sibling_token: r.sibling ? r.sibling.symbol : null,
+  native_chain: r.native_chain,
   category: r.category,
   family: r.family,
   chains: r.chains,

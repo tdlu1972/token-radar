@@ -64,6 +64,10 @@ function setAsideReason(p) {
 // A protocol whose first word names a protocol that already records a token is that token's sibling:
 // GMX Solana beside GMX, Kava Mint beside Kava Lend. Found from the snapshot's names, no list.
 function brandOf(name) { return name.toLowerCase().replace(/[^a-z0-9 ]/g, '').split(' ')[0]; }
+// A protocol named after a chain it runs on is that chain's own venue (Stellar AMM on Stellar): the
+// chain's token, not a new one, is the likely reward. DefiLlama names the XRP Ledger's chain Ripple.
+var CHAIN_ALIAS = { xrpl: 'ripple' };
+function nativeChain(p) { var b = brandOf(p.name); return p.chains.filter(c => brandOf(c) === b || brandOf(c) === CHAIN_ALIAS[b])[0] || null; }
 function siblings(protocols) {
   var map = {};
   protocols.forEach(p => {
@@ -274,7 +278,6 @@ function launchOdds(protocols, asOf) {
   return {
     base: T / N, terms: terms, loss: best, base_loss: loss([]), calibration: cal,
     selection: names.map(t => ({ term: t, label: ODDS_TERMS[t].label, kept: terms.includes(t), without: last[t].without, with: last[t].with })),
-    bands: AGE_BANDS.map(b => { var c = cnt['age:' + b[1]]; return { band: b[1], share: c ? (c.t + k * T / N) / (c.n + k) : T / N, n: c ? c.n : 0 }; }),
     of: (p, age) => {
       var b = {};
       names.forEach(t => { b[t] = t + ':' + ODDS_TERMS[t].of(p, age); });
@@ -379,7 +382,8 @@ function build(snapshot) {
     if (status === 'live') return;
     if (status === 'recorded') { aside.push({ slug: p.slug, name: p.name, reason: 'token on record, no market cap' }); return; }
     var sibling = sib[brandOf(p.name)] || null;
-    var why = watch[p.slug] ? null : setAsideReason(p) || (sibling ? 'sibling of a token that trades' : null);
+    var native = nativeChain(p);
+    var why = watch[p.slug] ? null : setAsideReason(p) || (sibling ? 'sibling of a token that trades' : native ? 'venue of its own chain' : null);
     if (why) { aside.push({ slug: p.slug, name: p.name, reason: why }); return; }
     var age = ageDays(snapshot.as_of, p.listed_at);
     var subject = { tvl_usd: p.tvl_usd, category: p.category, change_7d: p.change_7d, age_days: age };
@@ -393,7 +397,7 @@ function build(snapshot) {
       tvl_usd: p.tvl_usd, change_7d: p.change_7d, listed_at: p.listed_at, age_days: age,
       tier: watch[p.slug] ? 'watchlist' : 'early',
       token_status: 'pre-token',
-      sibling: sibling,
+      sibling: sibling, native_chain: native,
       implied_value_usd: implied,
       range_usd: [Math.round(implied / fit.held_out.model), Math.round(implied * fit.held_out.model)],
       model: { fitted_core: core, implied_multiple: core / p.tvl_usd, family_level: fit.family_levels[familyOf(p.category)], size_curve: core / parts.family / parts.growth / parts.age / parts.undated, parts: parts },
@@ -413,6 +417,6 @@ function build(snapshot) {
   return { rows: rows, live: live, aside: aside, fit: fit, odds: odds, constants: CONST, protocols: protocols.length };
 }
 
-var api = { build: build, liveTokens: liveTokens, fitValue: fitValue, tokenStatus: tokenStatus, familyOf: familyOf, CONST: CONST, VERSION: 'radar-fit-4' };
+var api = { build: build, liveTokens: liveTokens, fitValue: fitValue, tokenStatus: tokenStatus, familyOf: familyOf, CONST: CONST, VERSION: 'radar-fit-5' };
 if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.RadarModel = api;
 })(this);
