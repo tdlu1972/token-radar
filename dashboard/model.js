@@ -32,9 +32,11 @@ var CONST = {
   keep_gain: 0.01,        // a value term must cut the leave-one-out median miss by 1%
   odds_lambda: 1,         // ridge penalty on the launch-odds weights
   airdrop_share: 0.075,   // share of a launch's value a points campaign hands out
-  capital_usd: 500,       // the stake every farm plan is costed at
-  farm_ratio: 3,          // expected drop at least 3x the plan's fees: farm
-  thin_ratio: 1           // at least 1x: thin; below: skip
+  plan_share: 0.0005,    // default stake: 0.05% of TVL, rounded to $500
+  stake_min: 1000,
+  stake_max: 25000,
+  capital_charge: 0.02,   // a year, on the stake: what it gives up beyond the protocol's own yield
+  hour_usd: 25            // farm when the net pays this an hour of work
 };
 var FAMS = ['vaults', 'credit', 'trading', 'realworld', 'network'];
 
@@ -332,63 +334,47 @@ function usd(x) { return x < 1 ? '$' + x.toFixed(2) : '$' + Math.round(x).toLoca
 
 // The core move per category: what to do with the stake, and how long to keep doing it.
 var PLAYBOOK = {
-  vaults: { act: 'Deposit the USDC into the largest {name} curated vault on {chain} and keep the vault shares in the wallet', hold: 90, weekly: 'Top up or rebalance once a week so the account shows steady, recurring deposits' },
-  credit: { act: 'Supply the USDC to {name} on {chain}, then borrow 25% of it against the deposit so the account uses both sides of the market', hold: 90, weekly: 'Repay and re-borrow a small amount once a week, keeping the loan-to-value under 30%' },
-  trading: { act: 'Trade on {name} on {chain}: swap or open a 1x position with the USDC, then provide half of it as liquidity in the deepest stable pair', hold: 60, weekly: 'Make 3 to 5 trades a week of at least $50 each; volume is what trading points usually count' },
-  realworld: { act: 'Pass {name} onboarding (KYC where it asks), then mint or buy its yield product on {chain} with the USDC', hold: 120, weekly: 'Check the position weekly and roll any matured product into the next issue' },
-  network: { act: 'Bridge the USDC to {chain} through {name}\'s own entry point and use it: stake, delegate or deposit into its native pools', hold: 90, weekly: 'Use 2 or 3 native apps on {chain} each week so the wallet shows activity beyond one deposit' },
-  other: { act: 'Use {name}\'s core product on {chain} with the USDC, following its own docs for a first deposit', hold: 90, weekly: 'Repeat one qualifying action each week' }
+  vaults: { kind: 'Curated vault', tx: 2, act: 'Deposit the USDC into the largest {name} curated vault on {chain} and keep the vault shares in the wallet', hold: 90, weekly: 'Top up or rebalance once a week so the account shows steady, recurring deposits' },
+  credit: { kind: 'Supply and borrow', tx: 4, act: 'Supply the USDC to {name} on {chain}, then borrow 25% of it against the deposit so the account uses both sides of the market', hold: 90, weekly: 'Repay and re-borrow a small amount once a week, keeping the loan-to-value under 30%' },
+  trading: { kind: 'Trade and LP', tx: 8, fee: 0.6, act: 'Trade on {name} on {chain}: swap or open a 1x position with the USDC, then provide half of it as liquidity in the deepest stable pair', hold: 60, weekly: 'Make 3 to 5 trades a week of at least $50 each; volume is what trading points usually count' },
+  realworld: { kind: 'Tokenised asset', tx: 1, act: 'Pass {name} onboarding (KYC where it asks), then mint or buy its yield product on {chain} with the USDC', hold: 120, weekly: 'Check the position weekly and roll any matured product into the next issue' },
+  network: { kind: 'Bridge and use', tx: 3, act: 'Bridge the USDC to {chain} through {name}\'s own entry point and use it: stake, delegate or deposit into its native pools', hold: 90, weekly: 'Use 2 or 3 native apps on {chain} each week so the wallet shows activity beyond one deposit' },
+  other: { kind: 'Core product', tx: 2, act: 'Use {name}\'s core product on {chain} with the USDC, following its own docs for a first deposit', hold: 90, weekly: 'Repeat one qualifying action each week' }
 };
 
-// Farm steps: each one says what to do, what it costs and how long it takes.
-function farmPlan(p) {
-  var fam = familyOf(p.category);
-  var book = PLAYBOOK[fam];
-  var chain = cheapestChain(p.chains);
-  var gas = gasOf(chain);
-  var capital = p.tvl_usd < 20e6 ? 250 : CONST.capital_usd;
+// Farm plan: a dated schedule, each step with what it costs and how long it takes, then the sum. The
+// stake is sized to the protocol (plan_share of TVL, kept between stake_min and stake_max) unless the
+// reader picks one. Drop = implied value (odds included) x share to users x the stake's share of TVL;
+// net = drop - fees - capital charge; farm when net pays hour_usd an hour of work, thin when it is
+// above zero, skip when not.
+function dur(m) { return m < 60 ? Math.round(m) + ' min' : (m / 60).toFixed(1) + ' h'; }
+function farmPlan(p, implied, sc) {
+  sc = sc || {};
+  var book = PLAYBOOK[familyOf(p.category)], chain = cheapestChain(p.chains), gas = gasOf(chain);
+  var stake = sc.stake || clamp(Math.round(p.tvl_usd * CONST.plan_share / 500) * 500, CONST.stake_min, CONST.stake_max);
+  var share = sc.share || CONST.airdrop_share, days = book.hold, weeks = Math.floor(days / 7), months = Math.ceil(days / 30);
+  var move = 1 + gas * 2;
   var fill = s => s.replace(/\{name\}/g, p.name).replace(/\{chain\}/g, chain);
-  var steps = [];
-  steps.push({ text: 'Make a fresh wallet on ' + chain + ' that holds only the farming stake, and save its recovery phrase offline', cost: 'free', time: '10 minutes' });
-  steps.push({ text: 'Move ' + usd(capital) + ' of USDC to ' + chain + (chain === 'Ethereum' ? '' : ' with a bridge or a direct exchange withdrawal'), cost: 'about ' + usd(Math.max(1, capital * 0.001) + gas * 2) + ' in fees', time: '15 minutes' });
-  steps.push({ text: fill(book.act), cost: usd(capital) + ' of capital stays at work, plus ' + usd(gas * 3) + ' of gas', time: '20 minutes' });
-  steps.push({ text: fill(book.weekly), cost: 'about ' + usd(gas * 2 * 4) + ' of gas a month', time: '10 minutes a week' });
+  var steps = [
+    { when: 'Day 0', text: 'Make a fresh wallet on ' + chain + ' that holds only the farming stake, and save its recovery phrase offline', cost: 0, min: 10 },
+    { when: 'Day 0', text: 'Withdraw ' + usd(stake) + ' of USDC from an exchange to the wallet on ' + chain + (chain === 'Ethereum' ? '' : ', or bridge it there'), cost: move, min: 15 },
+    { when: 'Day 0', text: fill(book.act), cost: gas * 3, min: 20 }
+  ];
   if (p.chains.length > 1) {
     var second = p.chains.filter(c => c !== chain).sort((a, b) => gasOf(a) - gasOf(b))[0];
-    steps.push({ text: 'Repeat a smaller deposit on ' + second + ', ' + p.name + '\'s next cheapest chain, so the wallet counts on ' + p.chains.length + ' deployments rather than one', cost: usd(capital / 5) + ' of capital and ' + usd(gasOf(second) * 3) + ' of gas', time: '15 minutes' });
+    steps.push({ when: 'Day 1', text: 'Move a fifth of the stake to ' + second + ' and repeat the deposit there, so the wallet counts on 2 of ' + p.name + '\'s ' + p.chains.length + ' chains', cost: gas + gasOf(second) * 4, min: 15 });
   }
-  steps.push({ text: 'Hold the position for at least ' + book.hold + ' days so it spans more than one points snapshot; most campaigns weight time held, not size', cost: 'the stake stays deployed', time: book.hold + ' days' });
-  if (p.change_7d !== null && p.change_7d <= -10) {
-    steps.push({ text: 'TVL fell ' + Math.abs(p.change_7d).toFixed(1) + '% in the last week: check the protocol\'s announcements before adding more, and exit if it falls another 25%', cost: 'free', time: '5 minutes' });
-  } else if (p.change_7d !== null && p.change_7d >= 10) {
-    steps.push({ text: 'TVL rose ' + p.change_7d.toFixed(1) + '% in the last week: early deposits usually earn more per dollar, so set up this week rather than next month', cost: 'free', time: '5 minutes' });
-  }
-  steps.push({ text: 'Check ' + p.name + '\'s own points or rewards page each month and claim only through the link the project publishes; never sign a claim from a direct message', cost: 'free to check', time: '5 minutes a month' });
-  return { chain: chain, capital: capital, hold_days: book.hold, steps: steps, setup_cost: Math.max(1, capital * 0.001) + gas * 5, monthly_cost: gas * 8 };
+  steps.push({ when: 'Weekly ×' + weeks, text: fill(book.weekly), cost: (gas * book.tx + (book.fee || 0)) * weeks, min: 10 * weeks });
+  if (p.change_7d !== null && Math.abs(p.change_7d) >= 10) steps.push({ when: 'Any day', text: 'TVL ' + (p.change_7d < 0 ? 'fell ' : 'rose ') + Math.abs(p.change_7d).toFixed(1) + '% last week: exit early if TVL drops under ' + usd(p.tvl_usd * 0.75) + ', or if a token is announced before you are in', cost: 0, min: 5 });
+  steps.push({ when: 'Monthly ×' + months, text: 'Read ' + p.name + '\'s points or rewards page and note the balance; claim only through a link the project publishes, never one sent to you', cost: 0, min: 5 * months });
+  steps.push({ when: 'Day ' + days, text: 'Withdraw the stake back to the exchange; keep the wallet, since claims often open weeks after the snapshot', cost: move, min: 20 });
+  var fees = steps.reduce((s, t) => s + t.cost, 0), mins = steps.reduce((s, t) => s + t.min, 0), hours = mins / 60;
+  var capital = stake * CONST.capital_charge * days / 365, drop = implied * share * stake / p.tvl_usd, net = drop - fees - capital, perHour = net / hours;
+  var call = perHour >= CONST.hour_usd ? 'farm' : net > 0 ? 'thin' : 'skip';
+  steps.push({ when: 'All in', text: 'Expected drop ' + usd(drop) + ' (' + usd(implied) + ' implied × ' + (share * 100).toFixed(1) + '% to users × the stake\'s ' + (100 * stake / p.tvl_usd).toPrecision(2) + '% of TVL) less ' + usd(fees) + ' of gas and fees and ' + usd(capital) + ' of capital charge (' + CONST.capital_charge * 100 + '% a year): net ' + (net < 0 ? '−' : '+') + usd(Math.abs(net)) + ', ' + usd(perHour) + ' an hour. ' + call.toUpperCase(), cost: fees + capital, min: mins });
+  return { kind: book.kind, chain: chain, stake: stake, share: share, days: days, steps: steps, fees: fees, capital: capital, hours: hours, drop: drop, net: net, per_hour: perHour, call: call };
 }
-
-// The plan's last step states its verdict in dollars, so the board.json row carries it too.
-function verdictStep(v, plan) {
-  var head = v.call === 'farm' ? 'Verdict: farm' : v.call === 'thin' ? 'Verdict: thin, farm only with spare capital' : 'Verdict: skip at this stake';
-  var be = v.breakeven_stake_usd === null ? '' : '; fees are covered from a stake of about ' + usd(v.breakeven_stake_usd);
-  return { text: head + '. The ' + usd(plan.capital) + ' stake can expect about ' + usd(v.expected_usd) + ' of drop, odds-weighted, against ' + usd(v.fees_usd) + ' of fees over ' + plan.hold_days + ' days' + be, cost: usd(v.fees_usd) + ' in all', time: plan.hold_days + ' days' };
-}
-
-function stepText(s) { return s.text + '. Cost: ' + s.cost + '. Time: ' + s.time + '.'; }
-
-// Farm, thin or skip: the drop the stake can expect (implied value, odds included, x airdrop share x
-// the stake's share of TVL) against everything the plan costs over its hold.
-function verdict(plan, implied, tvl) {
-  var perDollar = implied * CONST.airdrop_share / tvl;
-  var expected = plan.capital * perDollar;
-  var fees = plan.setup_cost + plan.monthly_cost * plan.hold_days / 30;
-  var ratio = expected / fees;
-  return {
-    expected_usd: expected, fees_usd: fees, ratio: ratio,
-    call: ratio >= CONST.farm_ratio ? 'farm' : ratio >= CONST.thin_ratio ? 'thin' : 'skip',
-    breakeven_stake_usd: perDollar > 0 ? fees / perDollar : null
-  };
-}
+function stepText(s) { return s.when + ': ' + s.text + '. Cost: ' + usd(s.cost) + '. Time: ' + dur(s.min) + '.'; }
 
 // --- the radar
 
@@ -416,7 +402,7 @@ function build(snapshot) {
     var od = odds.of(p, age);
     // Implied value = value if it launches x the odds it does.
     var implied = Math.max(1, Math.round(core * od.odds));
-    var plan = farmPlan(p);
+    var plan = farmPlan(p, implied);
     rows.push({
       slug: p.slug, name: p.name, category: p.category, family: familyOf(p.category), chains: p.chains,
       tvl_usd: p.tvl_usd, change_7d: p.change_7d, listed_at: p.listed_at, age_days: age,
@@ -431,18 +417,14 @@ function build(snapshot) {
       launch_odds: od.odds,
       odds_parts: od,
       plan: plan,
-      verdict: verdict(plan, implied, p.tvl_usd),
-      farm_steps: null
+      farm_steps: plan.steps.map(stepText)
     });
-    var row = rows[rows.length - 1];
-    plan.steps.push(verdictStep(row.verdict, plan));
-    row.farm_steps = plan.steps.map(stepText);
   });
   rows.sort((a, b) => b.implied_value_usd - a.implied_value_usd || b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : 1));
   rows.forEach((r, i) => { r.rank = i + 1; });
   return { rows: rows, live: live, aside: aside, fit: fit, odds: odds, constants: CONST, protocols: protocols.length };
 }
 
-var api = { build: build, liveTokens: liveTokens, fitValue: fitValue, tokenStatus: tokenStatus, familyOf: familyOf, CONST: CONST, VERSION: 'radar-fit-6' };
+var api = { build: build, farmPlan: farmPlan, dur: dur, liveTokens: liveTokens, fitValue: fitValue, tokenStatus: tokenStatus, familyOf: familyOf, CONST: CONST, VERSION: 'radar-fit-7' };
 if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.RadarModel = api;
 })(this);
