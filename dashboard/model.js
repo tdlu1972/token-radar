@@ -114,7 +114,7 @@ var TERMS = {
   family: { label: 'family level', cols: FAMS.slice(), x: t => { var f = familyOf(t.category); return FAMS.map(n => f === n ? 1 : 0); } },
   growth: { label: '7-day TVL growth', cols: ['growth'], x: t => [growthX(t.change_7d)] },
   age: { label: 'years tracked', cols: ['age'], x: t => [t.age_days === null ? 0 : Math.min(6, t.age_days / 365) - CONST.age_center_years] },
-  control: { label: 'control: a random number', cols: ['control'], x: t => [noise(t.slug)] }
+  control: { label: 'control (random)', cols: ['control'], x: t => [noise(t.slug)] }
 };
 var CANDIDATES = ['family', 'growth', 'age', 'control'];
 function growthX(g) { return Math.tanh(clamp(g === null ? 0 : g, CONST.growth_floor, CONST.growth_cap) / 30); }
@@ -241,7 +241,7 @@ var ODDS_X = {
   growth: { label: '7-day TVL growth', cols: ['tanh(7d % ÷ 30)'], x: p => [growthX(p.change_7d)] },
   size: { label: 'TVL size', cols: ['ln TVL'], x: p => [Math.log(p.tvl_usd) - CONST.size_center] },
   chains: { label: 'chain count', cols: ['ln chains'], x: p => [Math.log(Math.max(1, p.chains.length))] },
-  control: { label: 'control: a random number', cols: ['noise'], x: p => [noise(p.slug)] }
+  control: { label: 'control (random)', cols: ['noise'], x: p => [noise(p.slug)] }
 };
 function sigmoid(z) { return 1 / (1 + Math.exp(-z)); }
 function oddsX(q, terms) { var x = [1]; terms.forEach(t => { x.push.apply(x, ODDS_X[t].x(q.p, q.a)); }); return x; }
@@ -425,6 +425,6 @@ function build(snapshot) {
   return { rows: rows, live: live, aside: aside, fit: fit, odds: odds, constants: CONST, protocols: protocols.length };
 }
 
-var api = { build: build, farmPlan: farmPlan, dur: dur, liveTokens: liveTokens, fitValue: fitValue, tokenStatus: tokenStatus, familyOf: familyOf, CONST: CONST, VERSION: 'radar-fit-7' };
+var api = { build: build, farmPlan: farmPlan, dur: dur, liveTokens: liveTokens, fitValue: fitValue, tokenStatus: tokenStatus, familyOf: familyOf, CONST: CONST, VERSION: 'radar-fit-8' };
 if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.RadarModel = api;
 })(this);
