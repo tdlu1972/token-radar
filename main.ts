@@ -66,16 +66,11 @@ const board = rows.map((r: any) => ({
   change_7d: r.change_7d,
   listed_at: r.listed_at,
   age_days: r.age_days,
-  model: {
-    fitted_core_usd: Math.round(r.model.fitted_core),
-    family_level: Number(r.model.family_level.toFixed(4)),
-    size_curve_usd: Math.round(r.model.size_curve),
-    family_x: Number(r.model.parts.family.toFixed(4)),
-    growth_x: Number(r.model.parts.growth.toFixed(4)),
-    age_x: Number(r.model.parts.age.toFixed(4)),
-  },
+  // implied_value_usd = value_if_launch_usd x launch_odds
+  value_if_launch_usd: r.launch_value_usd,
+  value_if_launch_p10_p25_p75_p90_usd: r.launch_range_usd,
   launch_odds: Number(r.launch_odds.toFixed(4)),
-  odds_peers: r.odds_parts.parts.map((q: { label: string; bucket: string; share: number }) => ({ by: q.label, peers: q.bucket, share: Number(q.share.toFixed(4)) })),
+  odds_log_odds: Object.fromEntries([['intercept', r.odds_parts.intercept], ...r.odds_parts.parts.map((q: { label: string; logit: number }) => [q.label, q.logit])].map(([k, v]) => [k, Number(v.toFixed(4))])),
   farm: {
     chain: r.plan.chain,
     capital_usd: r.plan.capital,
@@ -89,9 +84,9 @@ const board = rows.map((r: any) => ({
 }));
 
 mkdirSync(out, { recursive: true });
-const fit = { tokens: radar.fit.tokens, terms: radar.fit.terms, coef: radar.fit.coef, intercept: radar.fit.intercept, size_elasticity: radar.fit.size_elasticity, family_levels: radar.fit.family_levels, held_out: radar.fit.held_out, selection: radar.fit.selection };
+const fit = { tokens: radar.fit.tokens, terms: radar.fit.terms, coef: radar.fit.coef, intercept: radar.fit.intercept, size_elasticity: radar.fit.size_elasticity, held_out: radar.fit.held_out, selection: radar.fit.selection, residual_quantiles: radar.fit.q };
 const o = radar.odds;
-const odds = { base: o.base, terms: o.terms, log_loss: o.loss, base_log_loss: o.base_loss, selection: o.selection, calibration: o.calibration };
+const odds = { base: o.base, terms: o.terms, weights: o.weights, log_loss_10fold: o.loss, base_log_loss_10fold: o.base_loss, log_loss_walk_forward: o.wf, base_log_loss_walk_forward: o.base_wf, brier_10fold: o.brier, brier_walk_forward: o.wf_brier, selection: o.selection, calibration: o.calibration };
 writeFileSync(join(out, 'board.json'), `${JSON.stringify({ model: Model.VERSION, as_of: snapshot.as_of, source: snapshot.source, constants: Model.CONST, fit, odds, rows: board })}\n`);
 
 // The page gets the snapshot itself and runs the model on it.

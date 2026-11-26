@@ -35,8 +35,7 @@ code, pre{font-family:var(--mono)}
 .meta{margin:0 0 0 auto;color:var(--dim);font:12px var(--mono)}
 
 main{padding:24px 32px 48px;max-width:1440px;margin:0 auto}
-.hero{display:grid;grid-template-columns:1fr 420px;gap:32px;align-items:end;margin-bottom:20px}
-.hero.slim{grid-template-columns:1fr}
+.hero{margin-bottom:20px}
 h1{font-size:24px;line-height:1.25;margin:0 0 8px;font-weight:650;letter-spacing:-.01em;max-width:820px}
 .lede{color:var(--muted);margin:0;max-width:820px}
 .kpis{display:grid;grid-template-columns:1fr 1fr;gap:1px;margin:0;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:hidden}
@@ -62,10 +61,6 @@ sup{font-size:.7em}
 .strip li{font:12px var(--mono);padding:4px 10px;border-radius:6px;border:1px solid var(--line-2);background:var(--panel)}
 .strip li.ok{color:var(--green);border-color:var(--green-dim)}
 .strip li.bad{color:var(--red);border-color:var(--red)}
-.picks{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:0 0 14px}
-.picks a{display:grid;gap:2px;padding:10px 14px;border:1px solid var(--green-dim);border-radius:10px;background:var(--panel);color:var(--muted);font-size:12px}
-.picks b{color:var(--text);font-size:15px}
-.picks em{font:600 13px var(--mono);color:var(--green)}
 .filters{display:flex;flex-wrap:wrap;gap:12px;align-items:end;padding:14px;background:var(--panel);border:1px solid var(--line);border-radius:10px}
 .filters label, .field{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:12px}
 .filters .grow{flex:1 1 220px}
@@ -89,7 +84,6 @@ td{padding:7px 12px;border-bottom:1px solid var(--line);vertical-align:middle}
 .num{text-align:right;font-family:var(--mono);font-size:13px;white-space:nowrap}
 tbody tr{cursor:pointer}
 tbody tr:hover{background:var(--panel-2)}
-tbody tr.static{cursor:default}
 td.rank{color:var(--dim);width:52px}
 .name{font-weight:600}
 .sub{color:var(--dim);font-size:12px}
@@ -97,7 +91,6 @@ td.rank{color:var(--dim);width:52px}
 .tag.w{color:var(--green);background:rgba(61,220,151,.12)}
 .tag.e{color:var(--amber);background:rgba(242,184,75,.12)}
 .tag.s{color:var(--violet);background:rgba(180,147,255,.14)}
-.tag.l{color:var(--blue);background:rgba(108,182,255,.12);margin:0}
 td.value{width:220px}
 td.value .sub, td.num .sub{font-size:11px}
 .bar{display:inline-block;width:90px;height:6px;border-radius:3px;background:var(--line);margin-right:10px;vertical-align:middle;overflow:hidden}
@@ -142,22 +135,31 @@ h3{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mute
 .chart text.axis{fill:var(--muted);font-size:11px}
 .chart .fit{stroke:var(--amber);stroke-dasharray:5 4;fill:none;stroke-width:1.5}
 .chart .band{fill:rgba(61,220,151,.07)}
-.chart .barv{fill:var(--green)}
-.chart .barv.dim{fill:var(--green-dim)}
 tr.used td{color:var(--green);font-weight:600}
-.dot{opacity:.85}
 .legend{display:flex;flex-wrap:wrap;gap:4px 14px;margin:6px 0;font-size:12px;color:var(--muted)}
 .dot-key{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;background:var(--c, var(--muted))}
-.dot{fill:var(--c, var(--muted))}
+.dot{fill:var(--c, var(--muted));opacity:.85}
 .vaults{--c:var(--green)}
 .credit{--c:var(--blue)}
 .trading{--c:var(--amber)}
 .realworld{--c:var(--violet)}
 .network{--c:var(--red)}
 
+.kpis.row{grid-template-columns:repeat(5,1fr);margin-bottom:14px}
+.ledger{margin:0 0 14px;padding:12px 14px;background:var(--panel);border:1px solid var(--line);border-radius:10px;font-size:12px;color:var(--muted)}
+.ledger p{margin:0 0 8px}
+.ledger b{color:var(--text);font-family:var(--mono)}
+.lbar{display:flex;gap:2px;height:10px;border-radius:5px;overflow:hidden}
+.ledger ul{list-style:none;display:flex;flex-wrap:wrap;gap:4px 16px;margin:8px 0 0;padding:0}
+.ledger li i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px}
+.lbar i,.ledger li i{background:var(--c)}
+.c0{--c:var(--green)}.c1{--c:#2a9d6f}.c2{--c:var(--blue)}.c3{--c:var(--amber)}.c4{--c:var(--violet)}.c5{--c:#5c6b7b}.c6{--c:#4a5868}.c7{--c:#3b4756}.c8{--c:#5a4a7a}
+.ob{display:block;height:3px;margin-top:5px;background:var(--line-2);border-radius:2px}
+.ob i{display:block;height:100%;background:var(--blue);border-radius:2px}
+
 @media (max-width: 900px) {
-  .hero, .grid2{grid-template-columns:1fr}
-  .picks{grid-template-columns:1fr 1fr}
+  .grid2{grid-template-columns:1fr}
+  .kpis.row{grid-template-columns:1fr 1fr}
   .meta{display:none}
   .dhead, .detail{grid-template-columns:1fr}
   main, .top{padding-left:16px;padding-right:16px}

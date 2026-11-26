@@ -5,7 +5,7 @@
 
 var DAY = 86400000;
 
-// Category -> family. The value fit gives each family its own level; a category is too thin to.
+// Category -> family: a level the fits can afford, where one category is too thin.
 var FAMILY = {
   vaults: ['Risk Curators', 'Onchain Capital Allocator', 'Yield Aggregator', 'Yield', 'Liquidity Manager', 'Leveraged Farming', 'Farm', 'Options Vault', 'Indexes', 'Token Locker'],
   credit: ['Lending', 'CDP', 'CDP Manager', 'Uncollateralized Lending', 'Collateral Markets', 'Collateral Management', 'Dual-Token Stablecoin', 'Stablecoin Wrapper', 'Basis Trading'],
@@ -24,14 +24,14 @@ var WRAPPED = /\b(wrapped|staked|staking)\b/i;
 var EXCHANGE = /^(Binance|Coinbase|Bybit|Kraken|Bitget|OKX|Bitfinex|Gemini)/;
 
 var CONST = {
-  ridge_lambda: 3,        // ridge penalty on the fitted terms (not the intercept), chosen on held-out error
-  size_center: 18,        // ln TVL is centred here (about $66M) so the intercept reads as a mid-size cap
-  growth_floor: -50,      // the growth term reads tanh(clamped 7d % / 30)
+  ridge_lambda: 3,        // ridge penalty on the value terms (not the intercept)
+  size_center: 18,        // ln TVL is centred here (about $66M)
+  growth_floor: -50,      // growth reads tanh(clamped 7d % / 30)
   growth_cap: 100,
-  age_center_years: 3,    // the age term reads years tracked (capped at 6) minus 3
-  keep_gain: 0.01,        // a candidate term is kept only if it cuts the held-out median miss by 1% or more
-  odds_k: 5,              // pseudo-protocols pulling a thin category or age band toward the whole field
-  airdrop_share: 0.075,   // share of a launch's value a points campaign typically hands out
+  age_center_years: 3,    // age reads years tracked (capped at 6) minus 3
+  keep_gain: 0.01,        // a value term must cut the leave-one-out median miss by 1%
+  odds_lambda: 1,         // ridge penalty on the launch-odds weights
+  airdrop_share: 0.075,   // share of a launch's value a points campaign hands out
   capital_usd: 500,       // the stake every farm plan is costed at
   farm_ratio: 3,          // expected drop at least 3x the plan's fees: farm
   thin_ratio: 1           // at least 1x: thin; below: skip
@@ -61,11 +61,10 @@ function setAsideReason(p) {
   return null;
 }
 
-// A protocol whose first word names a protocol that already records a token is that token's sibling:
-// GMX Solana beside GMX, Kava Mint beside Kava Lend. Found from the snapshot's names, no list.
+// Sibling: the first word names a protocol that records a token (GMX Solana beside GMX). No list.
 function brandOf(name) { return name.toLowerCase().replace(/[^a-z0-9 ]/g, '').split(' ')[0]; }
-// A protocol named after a chain it runs on is that chain's own venue (Stellar AMM on Stellar): the
-// chain's token, not a new one, is the likely reward. DefiLlama names the XRP Ledger's chain Ripple.
+// Venue: named after a chain it runs on (Stellar AMM on Stellar), so the chain's token is the likely
+// reward. DefiLlama names the XRP Ledger's chain Ripple.
 var CHAIN_ALIAS = { xrpl: 'ripple' };
 function nativeChain(p) { var b = brandOf(p.name); return p.chains.filter(c => brandOf(c) === b || brandOf(c) === CHAIN_ALIAS[b])[0] || null; }
 function siblings(protocols) {
@@ -83,8 +82,7 @@ function ageDays(asOf, listed) {
   return isFinite(d) ? Math.max(0, d) : null;
 }
 
-// One row per traded token: protocols that carry the same ticker (Aave V2, V3, V4 and Horizon all
-// record AAVE) share one market cap, so the token's multiple is its cap over all of their TVL.
+// One row per traded ticker: Aave V2, V3 and Horizon share AAVE's cap, over all of their TVL.
 function liveTokens(protocols, asOf) {
   var by = {};
   protocols.forEach(p => {
@@ -100,41 +98,37 @@ function liveTokens(protocols, asOf) {
     var tvl = group.reduce((s, p) => s + p.tvl_usd, 0);
     if (tvl <= 0) return;
     out.push({ slug: lead.slug, name: lead.name, symbol: lead.symbol || key, category: lead.category, chains: lead.chains, change_7d: lead.change_7d, listed_at: lead.listed_at, age_days: asOf ? ageDays(asOf, lead.listed_at) : null,
-      mcap_usd: lead.mcap_usd, tvl_usd: tvl, products: group.length, multiple: lead.mcap_usd / tvl });
+      mcap_usd: lead.mcap_usd, tvl_usd: tvl, multiple: lead.mcap_usd / tvl });
   });
   return out.sort((a, b) => b.mcap_usd - a.mcap_usd);
 }
 
 // --- the value fit
 
-// The fitted core: ln(market cap) = a + b ln(TVL) + whichever candidate terms earn their place, by
+// Value if it launches: ln(market cap) = a + b ln(TVL) + whichever candidate terms earn their place, by
 // ridge least squares over the snapshot's traded tokens. b < 1 is the size curve: a small protocol's
 // cap is a larger multiple of its TVL than a large one's.
 var TERMS = {
   family: { label: 'family level', cols: FAMS.slice(), x: t => { var f = familyOf(t.category); return FAMS.map(n => f === n ? 1 : 0); } },
-  growth: { label: '7-day TVL growth', cols: ['growth'], x: t => [Math.tanh(clamp(t.change_7d === null ? 0 : t.change_7d, CONST.growth_floor, CONST.growth_cap) / 30)] },
+  growth: { label: '7-day TVL growth', cols: ['growth'], x: t => [growthX(t.change_7d)] },
   age: { label: 'years tracked', cols: ['age'], x: t => [t.age_days === null ? 0 : Math.min(6, t.age_days / 365) - CONST.age_center_years] },
-  undated: { label: 'no listing date', cols: ['undated'], x: t => [t.age_days === null ? 1 : 0] }
+  control: { label: 'control: a random number', cols: ['control'], x: t => [noise(t.slug)] }
 };
-var CANDIDATES = ['family', 'growth', 'age', 'undated'];
+var CANDIDATES = ['family', 'growth', 'age', 'control'];
+function growthX(g) { return Math.tanh(clamp(g === null ? 0 : g, CONST.growth_floor, CONST.growth_cap) / 30); }
+// A fixed pseudo-random number in [-1, 1] per slug: a control term with no signal.
+function noise(s) { var h = 2166136261; for (var i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return (h >>> 0) / 2147483648 - 1; }
 function features(t, terms) {
   var x = [1, Math.log(t.tvl_usd) - CONST.size_center];
   terms.forEach(name => { x.push.apply(x, TERMS[name].x(t)); });
   return x;
 }
 function dot(w, x) { var s = 0; for (var i = 0; i < x.length; i++) s += w[i] * x[i]; return s; }
+function quantile(a, q) { var s = a.slice().sort((x, y) => x - y), i = q * (s.length - 1), f = Math.floor(i); return s[f] + (s[Math.min(f + 1, s.length - 1)] - s[f]) * (i - f); }
 
-// Solve (X'X + lambda I') w = X'y by Gaussian elimination with partial pivoting.
-function ridge(X, y, lambda) {
-  var k = X[0].length, A = [], i, j, r;
-  for (i = 0; i < k; i++) {
-    A.push([]);
-    for (j = 0; j <= k; j++) {
-      var v = 0;
-      for (r = 0; r < X.length; r++) v += X[r][i] * (j < k ? X[r][j] : y[r]);
-      A[i].push(v + (i === j && i > 0 ? lambda : 0));
-    }
-  }
+// Solve the augmented system A = [M | v] by Gaussian elimination with partial pivoting.
+function gauss(A) {
+  var k = A.length, i, j, r;
   for (i = 0; i < k; i++) {
     var piv = i;
     for (r = i + 1; r < k; r++) if (Math.abs(A[r][i]) > Math.abs(A[piv][i])) piv = r;
@@ -147,15 +141,25 @@ function ridge(X, y, lambda) {
   }
   return A.map((row, n) => row[k] / row[n]);
 }
+// Ridge least squares: (X'X + lambda I') w = X'y, the intercept unpenalised.
+function ridge(X, y, lambda) {
+  var k = X[0].length, A = [];
+  for (var i = 0; i < k; i++) {
+    A.push([]);
+    for (var j = 0; j <= k; j++) {
+      var v = 0;
+      for (var r = 0; r < X.length; r++) v += X[r][i] * (j < k ? X[r][j] : y[r]);
+      A[i].push(v + (i === j && i > 0 ? lambda : 0));
+    }
+  }
+  return gauss(A);
+}
 
 // Held-out error of a predictor: each traded token is predicted by a fit that never saw it.
 function heldOut(live, predictWithout) {
-  var err = live.map((t, i) => {
-    var rest = live.filter((_, j) => j !== i);
-    return Math.abs(predictWithout(rest, t) - Math.log(t.mcap_usd));
-  });
-  var mean = err.reduce((a, b) => a + b, 0) / err.length;
-  return { factor: Math.exp(median(err)), mean: mean, within3: err.filter(e => e < Math.log(3)).length / err.length, errors: err };
+  var res = live.map((t, i) => Math.log(t.mcap_usd) - predictWithout(live.filter((_, j) => j !== i), t));
+  var err = res.map(Math.abs);
+  return { factor: Math.exp(median(err)), within3: err.filter(e => e < Math.log(3)).length / err.length, errors: err, res: res };
 }
 
 function fitOn(set, terms) {
@@ -165,46 +169,48 @@ function heldOutTerms(live, terms) {
   return heldOut(live, (rest, t) => dot(fitOn(rest, terms), features(t, terms)));
 }
 
-// Forward selection on held-out error: start from the size curve, try each candidate term, keep the
-// one that cuts the leave-one-out median miss most (by keep_gain or more), and repeat until none does.
-// Each term's last trial is kept, so the page shows what it was worth, kept or dropped.
+// Two blind tests per term: leave-one-out, and walk-forward (fit on the older 3/4 of dated tokens,
+// priced on the newest 1/4). Forward selection keeps the term that cuts the leave-one-out median miss
+// most (by keep_gain) while walk-forward does not rise. The control is tried, shown, never kept.
 function fitValue(live, inner) {
-  var terms = [], best = heldOutTerms(live, terms), last = {};
+  var dated = live.filter(t => t.listed_at).sort((a, b) => a.listed_at < b.listed_at ? -1 : a.listed_at > b.listed_at ? 1 : a.slug < b.slug ? -1 : 1);
+  var cut = Math.round(dated.length * 0.75), past = dated.slice(0, cut), next = dated.slice(cut);
+  var wfMiss = terms => { var w = fitOn(past, terms); return Math.exp(median(next.map(t => Math.abs(dot(w, features(t, terms)) - Math.log(t.mcap_usd))))); };
+  var terms = [], best = heldOutTerms(live, terms), bestWf = inner ? 0 : wfMiss(terms), last = {};
   for (;;) {
-    var pick = null, pickRes = null;
+    var pick = null, pickRes = null, pickWf = 0;
     CANDIDATES.forEach(c => {
       if (terms.includes(c)) return;
-      var r = heldOutTerms(live, terms.concat([c]));
-      last[c] = { without: best.factor, with: r.factor, mean_without: best.mean, mean_with: r.mean };
-      if (r.factor < best.factor * (1 - CONST.keep_gain) && (!pickRes || r.factor < pickRes.factor)) { pick = c; pickRes = r; }
+      var r = heldOutTerms(live, terms.concat([c])), wf = inner ? 0 : wfMiss(terms.concat([c]));
+      last[c] = { without: best.factor, with: r.factor, wf_without: bestWf, wf_with: wf };
+      if (c !== 'control' && r.factor < best.factor * (1 - CONST.keep_gain) && wf <= bestWf && (!pickRes || r.factor < pickRes.factor)) { pick = c; pickRes = r; pickWf = wf; }
     });
     if (!pick) break;
-    terms.push(pick); best = pickRes;
+    terms.push(pick); best = pickRes; bestWf = pickWf;
   }
   var verdicts = CANDIDATES.map(c => Object.assign({ term: c, label: TERMS[c].label, kept: terms.includes(c) }, last[c]));
   var w = fitOn(live, terms);
   var flat = heldOut(live, (rest, t) => Math.log(t.tvl_usd) + median(rest.map(u => Math.log(u.multiple))));
-  var sizeOnly = heldOutTerms(live, []);
-  // A second blind test, forward in time: the whole procedure, term selection included, re-run on the
-  // older dated tokens and scored on the newest quarter, which it never saw. Undated tokens sit out.
+  // The printed ranges: quantiles of the signed held-out misses, P25-P75 and P10-P90.
+  var q = [0.1, 0.25, 0.75, 0.9].map(p => quantile(best.res, p));
+  // The whole procedure re-run on the older tokens, scored on the newest: miss and range coverage.
   var forward = null;
   if (!inner) {
-    var dated = live.filter(t => t.listed_at).sort((a, b) => a.listed_at < b.listed_at ? -1 : a.listed_at > b.listed_at ? 1 : a.slug < b.slug ? -1 : 1);
-    var cut = Math.round(dated.length * 0.75), past = dated.slice(0, cut), next = dated.slice(cut), f = fitValue(past, true);
-    var fm = median(past.map(u => Math.log(u.multiple)));
+    var f = fitValue(past, true), fm = median(past.map(u => Math.log(u.multiple)));
+    var fr = next.map(t => Math.log(t.mcap_usd) - Math.log(f.predict(t)));
     var miss = g => Math.exp(median(next.map(t => Math.abs(g(t) - Math.log(t.mcap_usd)))));
-    forward = { train: past.length, test: next.length, from: next[0].listed_at, terms: f.terms, model: miss(t => Math.log(f.predict(t))), flat: miss(t => Math.log(t.tvl_usd) + fm) };
+    var inside = (a, b) => fr.filter(r => r >= f.q[a] && r <= f.q[b]).length / fr.length;
+    forward = { train: past.length, test: next.length, from: next[0].listed_at, terms: f.terms, model: miss(t => Math.log(f.predict(t))), flat: miss(t => Math.log(t.tvl_usd) + fm), in50: inside(1, 2), in80: inside(0, 3) };
   }
   var points = live.map((t, i) => ({ name: t.name, family: familyOf(t.category), actual: t.mcap_usd, fitted: Math.exp(dot(w, features(t, terms))), held_out_error: best.errors[i] }));
-  // Named coefficients: family levels (other = 0), and the kept scalar terms.
+  // Named coefficients of the kept terms.
   var coef = {}, at = 2;
   terms.forEach(name => { TERMS[name].cols.forEach(col => { coef[col] = w[at++]; }); });
-  var levels = { other: 0 };
-  FAMS.forEach(f => { levels[f] = coef[f] || 0; });
   return {
-    weights: w, terms: terms, coef: coef, intercept: w[0], size_elasticity: w[1], family_levels: levels, tokens: live.length,
-    selection: verdicts,
-    held_out: { model: best.factor, model_within3: best.within3, model_mean: best.mean, flat: flat.factor, flat_within3: flat.within3, flat_mean: flat.mean, size_only: sizeOnly.factor, size_only_within3: sizeOnly.within3, size_only_mean: sizeOnly.mean, forward: forward },
+    weights: w, terms: terms, coef: coef, intercept: w[0], size_elasticity: w[1], tokens: live.length,
+    selection: verdicts, q: q,
+    held_out: { model: best.factor, model_within3: best.within3, wf: bestWf, flat: flat.factor, flat_within3: flat.within3, forward: forward,
+      in50: best.res.filter(r => r >= q[1] && r <= q[2]).length / best.res.length, in80: best.res.filter(r => r >= q[0] && r <= q[3]).length / best.res.length },
     points: points,
     predict: t => Math.exp(dot(w, features(t, terms))),
     // The multiplier each kept term contributes for this protocol (1 when dropped).
@@ -224,66 +230,84 @@ function fitValue(live, inner) {
 
 // --- launch odds
 
-// The share of comparable protocols that already record a token, smoothed toward the whole snapshot
-// and combined on the log-odds scale. Which comparisons count is chosen the way the value terms are:
-// forward selection on leave-one-out log loss over every protocol, each scored without itself.
-var AGE_BANDS = [[365, 'under 1 year'], [730, '1 to 2 years'], [1460, '2 to 4 years'], [1e9, '4 years or more']];
-function ageBand(age) {
-  if (age === null) return 'unlisted';
-  for (var i = 0; ; i++) if (age < AGE_BANDS[i][0]) return AGE_BANDS[i][1];
-}
-function band(x, cuts, names) { for (var i = 0; i < cuts.length; i++) if (x < cuts[i]) return names[i]; return names[i]; }
-var ODDS_TERMS = {
-  category: { label: 'category', of: p => p.category },
-  age: { label: 'years tracked', of: (p, a) => ageBand(a) },
-  family: { label: 'family', of: p => familyOf(p.category) },
-  size: { label: 'TVL size', of: p => band(p.tvl_usd, [1e7, 5e7, 2.5e8], ['under $10M', '$10M to $50M', '$50M to $250M', '$250M or more']) },
-  chains: { label: 'chain count', of: p => band(p.chains.length, [2, 4], ['one chain', '2 to 3 chains', '4 chains or more']) },
-  growth: { label: '7-day TVL growth', of: p => p.change_7d === null ? 'not reported' : band(p.change_7d, [-5, 5], ['down over 5%', 'within 5%', 'up over 5%']) }
+// The chance a protocol records a token: ridge logistic regression on every protocol's 0/1 today.
+// A term is kept only if it lowers the held-out log loss on both tests: 10-fold (fold = index mod 10)
+// and walk-forward (older 3/4 of dated protocols fit, newest 1/4 scored). The control is never kept.
+var ODDS_X = {
+  age: { label: 'years tracked', cols: ['per year tracked', 'no listing date'], x: (p, a) => [a === null ? 0 : Math.min(6, a / 365) - CONST.age_center_years, a === null ? 1 : 0] },
+  family: { label: 'family', cols: FAMS, x: p => { var f = familyOf(p.category); return FAMS.map(n => f === n ? 1 : 0); } },
+  growth: { label: '7-day TVL growth', cols: ['tanh(7d % ÷ 30)'], x: p => [growthX(p.change_7d)] },
+  size: { label: 'TVL size', cols: ['ln TVL'], x: p => [Math.log(p.tvl_usd) - CONST.size_center] },
+  chains: { label: 'chain count', cols: ['ln chains'], x: p => [Math.log(Math.max(1, p.chains.length))] },
+  control: { label: 'control: a random number', cols: ['noise'], x: p => [noise(p.slug)] }
 };
-function logit(p) { return Math.log(p / (1 - p)); }
+function sigmoid(z) { return 1 / (1 + Math.exp(-z)); }
+function oddsX(q, terms) { var x = [1]; terms.forEach(t => { x.push.apply(x, ODDS_X[t].x(q.p, q.a)); }); return x; }
+// Newton steps on the penalised log likelihood (lambda on every weight but the intercept).
+function logistic(set, terms) {
+  var X = set.map(q => oddsX(q, terms)), k = X[0].length, w = X[0].map(() => 0);
+  for (var it = 0; it < 30; it++) {
+    var A = [];
+    for (var i = 0; i < k; i++) { A.push([]); for (var j = 0; j <= k; j++) A[i].push(i === j && i > 0 ? CONST.odds_lambda : 0); }
+    X.forEach((x, n) => {
+      var p = sigmoid(dot(w, x)), r = p * (1 - p), g = set[n].y - p;
+      for (var i = 0; i < k; i++) { A[i][k] += g * x[i]; for (var j = 0; j < k; j++) A[i][j] += r * x[i] * x[j]; }
+    });
+    for (i = 1; i < k; i++) A[i][k] -= CONST.odds_lambda * w[i];
+    var d = gauss(A), step = 0;
+    w = w.map((v, i) => { step = Math.max(step, Math.abs(d[i])); return v + d[i]; });
+    if (step < 1e-7) break;
+  }
+  return w;
+}
 function launchOdds(protocols, asOf) {
-  var k = CONST.odds_k, names = Object.keys(ODDS_TERMS), cnt = {}, T = 0, N = protocols.length;
-  var ps = protocols.map(p => {
-    var a = ageDays(asOf, p.listed_at), y = tokenStatus(p) !== 'pre' ? 1 : 0, b = {};
-    T += y;
-    names.forEach(t => { var key = t + ':' + ODDS_TERMS[t].of(p, a), c = cnt[key] = cnt[key] || { t: 0, n: 0 }; c.t += y; c.n++; b[t] = key; });
-    return { y: y, b: b };
-  });
-  // Odds from the given terms; `self` takes one protocol out of every count it sits in.
-  function score(b, terms, self) {
-    var y = self ? self.y : 0, d = self ? 1 : 0, base = (T - y) / (N - d), z = logit(base), sh = {};
-    terms.forEach(t => { var c = cnt[b[t]]; sh[t] = (c.t - y + k * base) / (c.n - d + k); z += logit(sh[t]) - logit(base); });
-    return { odds: 1 / (1 + Math.exp(-z)), shares: sh, base: base };
+  var ps = protocols.map((p, i) => ({ p: p, a: ageDays(asOf, p.listed_at), y: tokenStatus(p) !== 'pre' ? 1 : 0, i: i }));
+  var dated = ps.filter(q => q.a !== null).sort((a, b) => b.a - a.a || (a.p.slug < b.p.slug ? -1 : 1));
+  var cut = Math.round(dated.length * 0.75);
+  var ll = (o, y) => -Math.log(y ? o : 1 - o);
+  // Held-out odds for every protocol from 10 fits that never saw it.
+  function cvOdds(terms) {
+    var o = [];
+    for (var f = 0; f < 10; f++) {
+      var w = logistic(ps.filter(q => q.i % 10 !== f), terms);
+      ps.forEach(q => { if (q.i % 10 === f) o[q.i] = sigmoid(dot(w, oddsX(q, terms))); });
+    }
+    return o;
   }
-  function loss(terms) {
-    return ps.reduce((s, q) => { var o = score(q.b, terms, q).odds; return s - Math.log(q.y ? o : 1 - o); }, 0) / N;
+  function test(terms) {
+    var o = cvOdds(terms), w = logistic(dated.slice(0, cut), terms), nx = dated.slice(cut);
+    var fo = nx.map(q => sigmoid(dot(w, oddsX(q, terms))));
+    return { cv: ps.reduce((s, q) => s + ll(o[q.i], q.y), 0) / ps.length, wf: nx.reduce((s, q, n) => s + ll(fo[n], q.y), 0) / nx.length,
+      brier: ps.reduce((s, q) => s + (o[q.i] - q.y) * (o[q.i] - q.y), 0) / ps.length, wf_brier: nx.reduce((s, q, n) => s + (fo[n] - q.y) * (fo[n] - q.y), 0) / nx.length, odds: o };
   }
-  var terms = [], best = loss([]), last = {};
+  var names = Object.keys(ODDS_X), terms = [], best = test(terms), base = best, last = {};
   for (;;) {
-    var pick = null, pl = best;
+    var pick = null, pr = null;
     names.forEach(t => {
       if (terms.includes(t)) return;
-      var l = loss(terms.concat([t]));
-      last[t] = { without: best, with: l };
-      if (l < pl * (1 - CONST.keep_gain)) { pick = t; pl = l; }
+      var r = test(terms.concat([t]));
+      last[t] = { without: best.cv, with: r.cv, wf_without: best.wf, wf_with: r.wf };
+      if (t !== 'control' && r.cv < best.cv && r.wf < best.wf && (!pr || r.cv < pr.cv)) { pick = t; pr = r; }
     });
     if (!pick) break;
-    terms.push(pick); best = pl;
+    terms.push(pick); best = pr;
   }
   // Calibration: protocols grouped by their held-out odds, against the share that do record a token.
-  var cal = [0.25, 0.5, 0.75, 1.01].map(hi => ({ hi: Math.min(1, hi), n: 0, odds: 0, share: 0 }));
-  ps.forEach(q => { var o = score(q.b, terms, q).odds, c = cal[band(o, [0.25, 0.5, 0.75], [0, 1, 2, 3])]; c.n++; c.odds += o; c.share += q.y; });
+  var cal = [0.25, 0.5, 0.75, 1].map(hi => ({ hi: hi, n: 0, odds: 0, share: 0 }));
+  ps.forEach(q => { var o = best.odds[q.i], c = cal[Math.min(3, Math.floor(o * 4))]; c.n++; c.odds += o; c.share += q.y; });
   cal.forEach(c => { if (c.n) { c.odds /= c.n; c.share /= c.n; } });
+  var w = logistic(ps, terms), T = ps.reduce((s, q) => s + q.y, 0);
   return {
-    base: T / N, terms: terms, loss: best, base_loss: loss([]), calibration: cal,
-    selection: names.map(t => ({ term: t, label: ODDS_TERMS[t].label, kept: terms.includes(t), without: last[t].without, with: last[t].with })),
+    base: T / ps.length, terms: terms, weights: w, cols: [].concat.apply(['intercept'], terms.map(t => ODDS_X[t].cols)), loss: best.cv, base_loss: base.cv, wf: best.wf, base_wf: base.wf, brier: best.brier, base_brier: base.brier, wf_brier: best.wf_brier, base_wf_brier: base.wf_brier, calibration: cal,
+    selection: names.map(t => Object.assign({ term: t, label: ODDS_X[t].label, kept: terms.includes(t) }, last[t])),
+    // This protocol's odds, with each kept term's push on the log-odds scale.
     of: (p, age) => {
-      var b = {};
-      names.forEach(t => { b[t] = t + ':' + ODDS_TERMS[t].of(p, age); });
-      var r = score(b, terms, null);
-      r.parts = terms.map(t => ({ label: ODDS_TERMS[t].label, bucket: b[t].slice(t.length + 1), share: r.shares[t] }));
-      return r;
+      var at = 1, parts = terms.map(t => {
+        var x = ODDS_X[t].x(p, age), s = 0;
+        x.forEach(v => { s += w[at++] * v; });
+        return { term: t, label: ODDS_X[t].label, logit: s };
+      });
+      return { odds: sigmoid(parts.reduce((s, q) => s + q.logit, w[0])), intercept: w[0], parts: parts };
     }
   };
 }
@@ -352,10 +376,10 @@ function verdictStep(v, plan) {
 
 function stepText(s) { return s.text + '. Cost: ' + s.cost + '. Time: ' + s.time + '.'; }
 
-// Farm, thin or skip: the drop the stake can expect (value x airdrop share x stake's share of TVL x
-// launch odds) against everything the plan costs over its hold.
-function verdict(plan, implied, tvl, odds) {
-  var perDollar = implied * CONST.airdrop_share / tvl * odds;
+// Farm, thin or skip: the drop the stake can expect (implied value, odds included, x airdrop share x
+// the stake's share of TVL) against everything the plan costs over its hold.
+function verdict(plan, implied, tvl) {
+  var perDollar = implied * CONST.airdrop_share / tvl;
   var expected = plan.capital * perDollar;
   var fees = plan.setup_cost + plan.monthly_cost * plan.hold_days / 30;
   var ratio = expected / fees;
@@ -389,8 +413,9 @@ function build(snapshot) {
     var subject = { tvl_usd: p.tvl_usd, category: p.category, change_7d: p.change_7d, age_days: age };
     var core = fit.predict(subject);
     var parts = fit.parts(subject);
-    var implied = Math.max(1, Math.round(core));
     var od = odds.of(p, age);
+    // Implied value = value if it launches x the odds it does.
+    var implied = Math.max(1, Math.round(core * od.odds));
     var plan = farmPlan(p);
     rows.push({
       slug: p.slug, name: p.name, category: p.category, family: familyOf(p.category), chains: p.chains,
@@ -398,14 +423,15 @@ function build(snapshot) {
       tier: watch[p.slug] ? 'watchlist' : 'early',
       token_status: 'pre-token',
       sibling: sibling, native_chain: native,
+      launch_value_usd: Math.round(core),
+      launch_range_usd: fit.q.map(q => Math.round(core * Math.exp(q))),
       implied_value_usd: implied,
-      range_usd: [Math.round(implied / fit.held_out.model), Math.round(implied * fit.held_out.model)],
-      model: { fitted_core: core, implied_multiple: core / p.tvl_usd, family_level: fit.family_levels[familyOf(p.category)], size_curve: core / parts.family / parts.growth / parts.age / parts.undated, parts: parts },
+      range_usd: [Math.round(implied * Math.exp(fit.q[1])), Math.round(implied * Math.exp(fit.q[2]))],
+      model: { fitted_core: core, implied_multiple: implied / p.tvl_usd, parts: parts },
       launch_odds: od.odds,
       odds_parts: od,
-      airdrop_per_1k: implied * CONST.airdrop_share * 1000 / p.tvl_usd,
       plan: plan,
-      verdict: verdict(plan, implied, p.tvl_usd, od.odds),
+      verdict: verdict(plan, implied, p.tvl_usd),
       farm_steps: null
     });
     var row = rows[rows.length - 1];
@@ -417,6 +443,6 @@ function build(snapshot) {
   return { rows: rows, live: live, aside: aside, fit: fit, odds: odds, constants: CONST, protocols: protocols.length };
 }
 
-var api = { build: build, liveTokens: liveTokens, fitValue: fitValue, tokenStatus: tokenStatus, familyOf: familyOf, CONST: CONST, VERSION: 'radar-fit-5' };
+var api = { build: build, liveTokens: liveTokens, fitValue: fitValue, tokenStatus: tokenStatus, familyOf: familyOf, CONST: CONST, VERSION: 'radar-fit-6' };
 if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.RadarModel = api;
 })(this);
